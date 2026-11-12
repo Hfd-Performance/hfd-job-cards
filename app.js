@@ -129,7 +129,9 @@ async function route() {
 
   const [path, qs] = (location.hash || '#/').slice(1).split('?');
   const parts = path.split('/').filter(Boolean);
+  if (me.must_change_password) return viewChangePassword(true);
   try {
+    if (parts[0] === 'password') return viewChangePassword(false);
     if (parts[0] === 'job' && parts[1]) return await viewJob(parts[1]);
     if (parts[0] === 'print' && parts[1]) return await viewPrint(parts[1]);
     if (parts[0] === 'settings') return await viewSettings(new URLSearchParams(qs || ''));
@@ -165,6 +167,66 @@ function viewLogin() {
     });
     if (error) return fail(error);
     toast('Check your email for the sign-in link', 'ok', 6000);
+  };
+}
+
+// ------------------------------------------------------------ choose / change password
+function viewChangePassword(forced) {
+  const form = `<form class="login card" id="pwForm" style="margin-top:${forced ? '10vh' : '0'}">
+      <h2>${forced ? `Welcome${me.display_name ? `, ${esc(me.display_name)}` : ''}` : 'Change my password'}</h2>
+      ${forced ? '<p class="muted" style="margin:0">Before you start, please choose your own password. You\'ll use it to sign in from now on.</p>' : ''}
+      <label>New password<input name="p1" type="password" autocomplete="new-password" minlength="8" required></label>
+      <label>Type it again<input name="p2" type="password" autocomplete="new-password" minlength="8" required></label>
+      <p class="small muted" style="margin:0">At least 8 characters.</p>
+      <button>Save password</button>
+      ${forced ? '<button type="button" class="ghost" id="pwOut">Sign out</button>' : '<a href="#/settings"><button type="button" class="ghost" style="width:100%">Cancel</button></a>'}
+    </form>`;
+  if (forced) $app.innerHTML = form; else shell('Change password', form, { back: '#/settings' });
+  const f = q('#pwForm');
+  if (q('#pwOut')) q('#pwOut').onclick = () => sb.auth.signOut();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    if (f.p1.value !== f.p2.value) return toast('The two passwords don\'t match', 'error');
+    const btn = f.querySelector('button'); btn.disabled = true;
+    const { error } = await sb.auth.updateUser({ password: f.p1.value });
+    if (error) { btn.disabled = false; return fail(error.message.includes('different') ? new Error('Choose a password different from the temporary one') : error); }
+    await sb.rpc('password_changed');
+    me.must_change_password = false;
+    toast('Password saved', 'ok');
+    location.hash = '#/';
+    route();
+  };
+}
+
+// --- login email: automatic if Resend is set up, otherwise a ready-to-send email in the admin's own mail app
+function loginEmailParts({ to, name, password, kind }) {
+  const biz = settings?.business_name || 'Workshop';
+  const url = location.origin + location.pathname;
+  const subject = kind === 'new' ? `Your ${biz} job card login` : `Your ${biz} job card password was reset`;
+  const body = `Hi ${name || ''},\n\n${kind === 'new' ? `A login has been set up for you on the ${biz} job card app.` : `Your password for the ${biz} job card app has been reset.`}`
+    + `\n\nWeb address: ${url}\nEmail: ${to}\nTemporary password: ${password}`
+    + `\n\nYou'll be asked to choose your own password the first time you sign in.`
+    + `\n\nTip: open the link on your phone and choose "Add to Home Screen" so it opens like an app.\n\n${biz}`;
+  return { subject, body, href: `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}` };
+}
+function loginResultCard(res, info) {
+  const m = loginEmailParts(info);
+  if (res.emailed) {
+    return `<div class="card" style="border-color:var(--ok)"><b>✓ ${info.kind === 'new' ? 'Login created' : 'Password reset'} for ${esc(info.name)}.</b><br>
+      A login email has been sent to <b>${esc(info.to)}</b>. They'll choose their own password when they first sign in.</div>`;
+  }
+  const why = res.email_error && res.email_error !== 'not_configured' ? `<div class="small" style="color:var(--bad)">Automatic email failed: ${esc(res.email_error)}</div>` : '';
+  return `<div class="card" style="border-color:var(--ok)"><b>✓ ${info.kind === 'new' ? 'Login created' : 'Password reset'} for ${esc(info.name)}.</b>
+    <div style="margin:8px 0">Email: <b>${esc(info.to)}</b><br>Temporary password: <b class="mono">${esc(info.password)}</b></div>
+    ${why}
+    <div class="actions"><a class="ghost-btn" href="${esc(m.href)}">📧 Send login email</a><button type="button" class="ghost" data-copy>Copy details</button></div>
+    <p class="small muted" style="margin:8px 0 0">This opens your email app with the message written. They'll choose their own password when they first sign in.</p></div>`;
+}
+function wireLoginResult(el, info) {
+  const b = el.querySelector('[data-copy]');
+  if (b) b.onclick = async () => {
+    const m = loginEmailParts(info);
+    try { await navigator.clipboard.writeText(`${m.subject}\n\n${m.body}`); toast('Copied', 'ok', 1500); } catch { toast('Copy not allowed here', 'error'); }
   };
 }
 
@@ -975,7 +1037,8 @@ async function viewSettings(params) {
   else if (params.get('xero')) toast(`Xero connection: ${params.get('xero')}`, 'error', 5000);
 
   const signOut = `<section class="card"><h2>${esc(me.display_name)}</h2>
-    <p class="muted small">${me.is_admin ? 'Admin' : 'Technician'}</p><button class="ghost" id="signout">Sign out</button></section>`;
+    <p class="muted small">${me.is_admin ? 'Admin' : 'Technician'}</p>
+    <div class="actions"><a href="#/password"><button class="ghost" type="button">Change my password</button></a><button class="ghost" id="signout">Sign out</button></div></section>`;
 
   if (!me.is_admin) {
     main.innerHTML = signOut;
@@ -1012,11 +1075,14 @@ async function viewSettings(params) {
     </section>
     <section class="card"><h2>Staff logins</h2><div id="staff"></div>
       <form id="staffForm" class="grid2" style="margin-top:14px">
-        <h3 class="span2" style="margin:0">Add a staff member</h3>
+        <label class="span2">Generic starting password <span class="muted">(filled in for every new login; they must change it at first sign-in)</span>
+          <input id="genericPw" class="mono" autocomplete="off" placeholder="e.g. HFDwelcome2026"></label>
+        <h3 class="span2" style="margin:6px 0 0">Add a staff member</h3>
         <label>Name<input name="display_name" required placeholder="e.g. Jake"></label>
         <label>Email (their login)<input name="email" type="email" required autocomplete="off"></label>
         <label class="span2">Password<div class="row"><input name="password" required minlength="8" autocomplete="new-password" class="mono"><button type="button" class="ghost" id="genPw">Generate</button></div></label>
         <label class="span2 check-row" style="margin-top:0"><input type="checkbox" name="is_admin"> Admin (can change settings, rules, delete jobs and any photo)</label>
+        <p class="span2 small muted" style="margin:0">They'll get an email with the web address and this password, and must choose their own password the first time they sign in.</p>
         <button class="span2">Create login</button>
         <div class="span2" id="newLogin"></div>
       </form>
@@ -1201,10 +1267,14 @@ async function viewSettings(params) {
     });
     q('#staff').querySelectorAll('[data-pw]').forEach((b) => b.onclick = async () => {
       const p = profiles.find((x) => x.id === b.dataset.pw);
-      const pw = prompt(`New password for ${p.display_name} (8+ characters)`, genPassword());
+      const pw = prompt(`Temporary password for ${p.display_name} (8+ characters). They'll have to change it when they next sign in.`, genericPw || genPassword());
       if (!pw) return;
-      try { await fn('staff', '/password', { method: 'POST', body: { user_id: p.id, password: pw } }); toast(`Password changed for ${p.display_name}: ${pw}`, 'ok', 9000); }
-      catch (e) { fail(e); }
+      try {
+        const r = await fn('staff', '/password', { method: 'POST', body: { user_id: p.id, password: pw } });
+        const info = { to: r.email || emails[p.id]?.email || '', name: p.display_name, password: pw, kind: 'reset' };
+        const el = q('#newLogin'); el.innerHTML = loginResultCard(r, info); wireLoginResult(el, info);
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (e) { fail(e); }
     });
     q('#staff').querySelectorAll('[data-rm]').forEach((b) => b.onclick = async () => {
       const p = profiles.find((x) => x.id === b.dataset.rm);
@@ -1214,18 +1284,30 @@ async function viewSettings(params) {
     });
   }
   const sf = q('#staffForm');
-  q('#genPw').onclick = () => { sf.password.value = genPassword(); };
+  let genericPw = (await sb.from('admin_settings').select('default_staff_password').eq('id', 1).maybeSingle()).data?.default_staff_password || '';
+  q('#genericPw').value = genericPw;
+  sf.password.value = genericPw;
+  q('#genericPw').onchange = async (e) => {
+    const v = e.target.value.trim();
+    if (v && v.length < 8) return toast('Make it at least 8 characters', 'error');
+    const { error } = await sb.from('admin_settings').update({ default_staff_password: v || null, updated_at: new Date().toISOString() }).eq('id', 1);
+    if (error) return fail(error);
+    genericPw = v; if (!sf.password.value || sf.password.dataset.generic) { sf.password.value = v; sf.password.dataset.generic = '1'; }
+    flashSaved(e.target);
+  };
+  sf.password.dataset.generic = '1';
+  sf.password.oninput = () => { delete sf.password.dataset.generic; };
+  q('#genPw').onclick = () => { sf.password.value = genPassword(); delete sf.password.dataset.generic; };
   sf.onsubmit = async (e) => {
     e.preventDefault();
     const body = { display_name: sf.display_name.value.trim(), email: sf.email.value.trim(), password: sf.password.value, is_admin: sf.is_admin.checked };
     const btn = sf.querySelector('button:not([type])'); btn.disabled = true;
     try {
-      await fn('staff', '/create', { method: 'POST', body });
-      q('#newLogin').innerHTML = `<div class="card" style="border-color:var(--ok)">
-        <b>✓ Login created for ${esc(body.display_name)}.</b> Give them:<br>
-        Web address: <b>${esc(location.origin + location.pathname)}</b><br>
-        Email: <b>${esc(body.email)}</b><br>Password: <b class="mono">${esc(body.password)}</b></div>`;
-      sf.reset();
+      const r = await fn('staff', '/create', { method: 'POST', body });
+      const info = { to: body.email, name: body.display_name, password: body.password, kind: 'new' };
+      const el = q('#newLogin'); el.innerHTML = loginResultCard(r, info); wireLoginResult(el, info);
+      sf.display_name.value = ''; sf.email.value = ''; sf.is_admin.checked = false;
+      sf.password.value = genericPw; sf.password.dataset.generic = '1';
       await renderStaff();
     } catch (err) { fail(err); } finally { btn.disabled = false; }
   };
