@@ -704,7 +704,7 @@ async function viewJob(id) {
     const others = custVehicles.filter((x) => x.id !== v.id);
     q('#vehicle').innerHTML = `
       <div class="row rego-row">
-        <label>Rego<input id="vRego" class="big mono" data-vid="${esc(v.id ?? '')}" value="${esc(v.rego ?? '')}" autocapitalize="characters" autocomplete="off" enterkeyhint="search"></label>
+        <label>Rego<input id="vRego" class="big mono" data-showing="${esc(v.id ?? '')}" value="${esc(v.rego ?? '')}" autocapitalize="characters" autocomplete="off" enterkeyhint="search"></label>
         <label class="shrink">State<select id="vState">${['QLD', 'NSW', 'VIC', 'SA', 'WA', 'TAS', 'NT', 'ACT'].map((st) => `<option ${(v.state || 'QLD') === st ? 'selected' : ''}>${st}</option>`).join('')}</select></label>
         <button id="vFind" style="align-self:end">Find</button>
       </div>
@@ -734,10 +734,11 @@ async function viewJob(id) {
         saveVehicle({ [f]: f === 'year' ? (parseInt(inp.value, 10) || null) : (inp.value.trim() || null) }, inp);
       };
     });
-    q('#vehicle').querySelectorAll('[data-vid]').forEach((b) => { b.onclick = () => linkVehicle(b.dataset.vid); });
+    q('#vehicle').querySelectorAll('button.chip[data-vid]').forEach((b) => { b.onclick = () => { if (b.dataset.vid) linkVehicle(b.dataset.vid); }; });
   }
 
   async function linkVehicle(vehicleId) {
+    if (!vehicleId) return;
     const { error } = await sb.from('jobs').update({ vehicle_id: vehicleId }).eq('id', id);
     if (error) return fail(error);
     await afterVehicleChange(true);
@@ -1165,7 +1166,7 @@ async function viewJob(id) {
       debounce(async () => { await loadPhotos(); renderPhotos(); }, 600))
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs', filter: `id=eq.${id}` },
       debounce(async () => {
-        const prevVehicle = q('#vRego')?.dataset.vid;
+        const prevVehicle = q('#vRego')?.dataset.showing;
         await loadJob();
         renderBanner(); updateBadge();
         setIfIdle(q('#status'), job.status);
