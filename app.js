@@ -36,6 +36,11 @@ function toast(msg, kind = 'info', ms = 3200) {
   q('#toasts').appendChild(el);
   setTimeout(() => el.remove(), ms);
 }
+function flashSaved(el) {
+  if (!el) return;
+  el.classList.remove('saved'); void el.offsetWidth; el.classList.add('saved');
+  setTimeout(() => el.classList.remove('saved'), 1200);
+}
 const fail = (e) => { console.error(e); toast(e?.message ?? String(e), 'error', 5000); };
 
 // call an edge function
@@ -347,17 +352,27 @@ async function viewJob(id) {
         <label>Odometer in (km)<input id="odoIn" type="number" inputmode="numeric" value="${job.odometer_in ?? ''}"></label>
         <label>Odometer out (km)<input id="odoOut" type="number" inputmode="numeric" value="${job.odometer_out ?? ''}"></label>
       </div>`;
-    const save = async (patch) => {
+    const save = async (patch, el) => {
       const { error } = await sb.from('jobs').update(patch).eq('id', id);
       if (error) return fail(error);
       Object.assign(job, patch);
-      toast('Saved', 'ok', 1200);
+      flashSaved(el);
     };
-    q('#status').onchange = (e) => save({ status: e.target.value }).then(renderHead);
-    q('#assigned').onchange = (e) => save({ assigned_to: e.target.value || null });
+    q('#status').onchange = (e) => save({ status: e.target.value }, e.target).then(updateBadge);
+    q('#assigned').onchange = (e) => save({ assigned_to: e.target.value || null }, e.target);
     const odo = (v) => (v === '' ? null : Math.max(0, parseInt(v, 10) || 0));
-    q('#odoIn').onchange = (e) => save({ odometer_in: odo(e.target.value) });
-    q('#odoOut').onchange = (e) => save({ odometer_out: odo(e.target.value) });
+    q('#odoIn').onchange = (e) => save({ odometer_in: odo(e.target.value) }, e.target);
+    q('#odoOut').onchange = (e) => save({ odometer_out: odo(e.target.value) }, e.target);
+  }
+  function updateBadge() {
+    const b = q('#head .badge');
+    if (b) { b.className = `badge ${job.status}`; b.textContent = STATUS[job.status]; }
+  }
+  // Put fresh values into fields the user isn't currently in (never redraws, so focus is never lost)
+  function setIfIdle(el, val) {
+    if (!el || el === document.activeElement) return;
+    const v = val ?? '';
+    if (String(el.value) !== String(v)) el.value = v;
   }
 
   // ---------------- vehicle
@@ -366,7 +381,7 @@ async function viewJob(id) {
     const others = custVehicles.filter((x) => x.id !== v.id);
     q('#vehicle').innerHTML = `
       <div class="row">
-        <label>Rego (QLD)<input id="vRego" class="big mono" value="${esc(v.rego ?? '')}" autocapitalize="characters" autocomplete="off" enterkeyhint="go"></label>
+        <label>Rego (QLD)<input id="vRego" class="big mono" data-vid="${esc(v.id ?? '')}" value="${esc(v.rego ?? '')}" autocapitalize="characters" autocomplete="off" enterkeyhint="search"></label>
         <button id="vFind" style="align-self:end">Find</button>
       </div>
       <div class="grid2" style="margin-top:10px">
@@ -384,11 +399,11 @@ async function viewJob(id) {
     q('#vFind').onclick = () => findRego(q('#vRego').value);
     q('#vRego').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); findRego(e.target.value); } };
     q('#vVin').oninput = (e) => { q('#vinHint').textContent = vinInfo(e.target.value); };
-    q('#vVin').onchange = (e) => saveVehicle({ vin: normRego(e.target.value) || null });
+    q('#vVin').onchange = (e) => saveVehicle({ vin: normRego(e.target.value) || null }, e.target);
     q('#vehicle').querySelectorAll('input[data-f]').forEach((inp) => {
       inp.onchange = () => {
         const f = inp.dataset.f;
-        saveVehicle({ [f]: f === 'year' ? (parseInt(inp.value, 10) || null) : (inp.value.trim() || null) });
+        saveVehicle({ [f]: f === 'year' ? (parseInt(inp.value, 10) || null) : (inp.value.trim() || null) }, inp);
       };
     });
     q('#vehicle').querySelectorAll('[data-vid]').forEach((b) => { b.onclick = () => linkVehicle(b.dataset.vid); });
@@ -432,26 +447,38 @@ async function viewJob(id) {
     } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = 'Find'; }
   }
 
-  async function saveVehicle(patch) {
+  // Saves one vehicle field in the background. Deliberately does NOT redraw the form.
+  async function saveVehicle(patch, el) {
     if (!job.vehicle) {
       // no vehicle yet → create one without a rego
       const ins = await sb.from('vehicles').insert({ ...patch, xero_contact_id: job.xero_contact_id, lookup_source: 'manual' }).select('*').single();
       if (ins.error) return fail(ins.error);
       const { error } = await sb.from('jobs').update({ vehicle_id: ins.data.id }).eq('id', id);
       if (error) return fail(error);
+      job.vehicle = ins.data; job.vehicle_id = ins.data.id;
     } else {
       const { error } = await sb.from('vehicles').update(patch).eq('id', job.vehicle.id);
       if (error) return fail(error);
+      Object.assign(job.vehicle, patch);
     }
-    toast('Vehicle saved', 'ok', 1200);
-    await afterVehicleChange(false);
+    flashSaved(el);
+    if (['make', 'model', 'year', 'engine'].some((k) => k in patch)) applyRules();
   }
 
+  async function applyRules() {
+    const { data: n } = await sb.rpc('apply_doc_rules', { p_job: id });
+    if (n > 0) { await Promise.all([loadDocs(), loadTasks()]); renderDocs(); renderTasks(); toast('Tech docs / checks added for this job', 'ok'); }
+  }
+
+  // Only runs when a different vehicle is linked (Find / tapping a customer's car)
   async function afterVehicleChange(regoChanged) {
     await loadJob();
     renderVehicle();
-    const { data: n } = await sb.rpc('apply_doc_rules', { p_job: id });
-    if (n > 0) { await Promise.all([loadDocs(), loadTasks()]); renderDocs(); renderTasks(); toast('Tech docs / checks added for this job', 'ok'); }
+    // carry on to the next empty field
+    const next = ['#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]']
+      .map((sel) => q(sel)).find((el) => el && !el.value);
+    if (next) next.focus();
+    await applyRules();
     if (regoChanged && job.vehicle?.rego && settings?.rego_to_xero_reference) {
       fn('xero', '/reference', { method: 'POST', body: { job_id: id } })
         .then((r) => { if (r.reference && !r.unchanged) toast(`Xero reference set: ${r.reference}`, 'ok'); else if (r.skipped) toast(`Rego not written to Xero: ${r.skipped}`); })
@@ -752,6 +779,20 @@ async function viewJob(id) {
   renderBanner(); renderHead(); renderVehicle(); renderTasks(); renderDocs(); renderPhotos();
   syncNow(false);
 
+  const FIELD_ORDER = ['#odoIn', '#odoOut', '#vRego', '#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]', 'input[data-f=colour]'];
+  main.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.target.tagName !== 'INPUT' || e.target.id === 'vRego') return;
+    const order = FIELD_ORDER.map((sel) => q(sel)).filter(Boolean);
+    const i = order.indexOf(e.target);
+    if (i === -1) return;
+    e.preventDefault();
+    const nxt = order[i + 1];
+    if (nxt) nxt.focus(); else e.target.blur();
+  });
+  main.addEventListener('focusin', (e) => {
+    if (e.target.tagName === 'INPUT' && FIELD_ORDER.some((sel) => e.target.matches(sel)) && e.target.id !== 'vRego') e.target.setAttribute('enterkeyhint', 'next');
+  });
+
   // ---------------- live updates from other tablets
   const ch = sb.channel(`job-${id}`)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'job_tasks', filter: `job_id=eq.${id}` },
@@ -760,10 +801,21 @@ async function viewJob(id) {
       debounce(async () => { await loadPhotos(); renderPhotos(); }, 600))
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs', filter: `id=eq.${id}` },
       debounce(async () => {
-        const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+        const prevVehicle = q('#vRego')?.dataset.vid;
         await loadJob();
-        renderBanner();
-        if (!typing) { renderHead(); renderVehicle(); if (notes.value !== (job.tech_notes ?? '')) notes.value = job.tech_notes ?? ''; }
+        renderBanner(); updateBadge();
+        setIfIdle(q('#status'), job.status);
+        setIfIdle(q('#assigned'), job.assigned_to);
+        setIfIdle(q('#odoIn'), job.odometer_in);
+        setIfIdle(q('#odoOut'), job.odometer_out);
+        setIfIdle(notes, job.tech_notes);
+        const v = job.vehicle || {};
+        const inVehicleForm = q('#vehicle').contains(document.activeElement);
+        if ((v.id ?? '') !== (prevVehicle ?? '') && !inVehicleForm) renderVehicle();   // another tablet linked a different car
+        else {
+          setIfIdle(q('#vRego'), v.rego); setIfIdle(q('#vVin'), v.vin);
+          q('#vehicle').querySelectorAll('input[data-f]').forEach((i) => setIfIdle(i, v[i.dataset.f]));
+        }
       }, 600))
     .subscribe();
   cleanup.push(() => sb.removeChannel(ch));

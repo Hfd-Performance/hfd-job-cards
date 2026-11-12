@@ -226,3 +226,6 @@ button.icon { min-height: 40px; width: 40px; padding: 0; background: transparent
 .check-row input { width: 24px; height: 24px; min-height: 0; flex: 0 0 24px; }
 .rule-fields { border-left: 3px solid var(--accent); padding: 8px 0 4px 12px; margin-top: 6px; }
 .ro-ops thead th.c-no, .ro-ops thead th.c-tech { color: #fff; font-size: 7.5pt; }
+
+/* quiet "saved" confirmation on the field itself */
+input.saved, select.saved, textarea.saved { border-color: var(--ok) !important; box-shadow: 0 0 0 3px rgba(60,207,122,.28); transition: box-shadow .3s, border-color .3s; }
