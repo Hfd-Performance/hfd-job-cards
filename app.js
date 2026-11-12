@@ -349,8 +349,7 @@ async function viewJob(id) {
       <div class="grid2" style="margin-top:12px">
         <label>Status<select id="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${job.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tech<select id="assigned"><option value="">Unassigned</option>${profiles.map((p) => `<option value="${p.id}" ${job.assigned_to === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></label>
-        <label>Odometer in (km)<input id="odoIn" type="number" inputmode="numeric" value="${job.odometer_in ?? ''}"></label>
-        <label>Odometer out (km)<input id="odoOut" type="number" inputmode="numeric" value="${job.odometer_out ?? ''}"></label>
+        <label class="span2">Odometer (km)<input id="odoIn" type="number" inputmode="numeric" value="${job.odometer_in ?? ''}"></label>
       </div>`;
     const save = async (patch, el) => {
       const { error } = await sb.from('jobs').update(patch).eq('id', id);
@@ -362,7 +361,6 @@ async function viewJob(id) {
     q('#assigned').onchange = (e) => save({ assigned_to: e.target.value || null }, e.target);
     const odo = (v) => (v === '' ? null : Math.max(0, parseInt(v, 10) || 0));
     q('#odoIn').onchange = (e) => save({ odometer_in: odo(e.target.value) }, e.target);
-    q('#odoOut').onchange = (e) => save({ odometer_out: odo(e.target.value) }, e.target);
   }
   function updateBadge() {
     const b = q('#head .badge');
@@ -779,7 +777,7 @@ async function viewJob(id) {
   renderBanner(); renderHead(); renderVehicle(); renderTasks(); renderDocs(); renderPhotos();
   syncNow(false);
 
-  const FIELD_ORDER = ['#odoIn', '#odoOut', '#vRego', '#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]', 'input[data-f=colour]'];
+  const FIELD_ORDER = ['#odoIn', '#vRego', '#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]', 'input[data-f=colour]'];
   main.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || e.target.tagName !== 'INPUT' || e.target.id === 'vRego') return;
     const order = FIELD_ORDER.map((sel) => q(sel)).filter(Boolean);
@@ -807,7 +805,6 @@ async function viewJob(id) {
         setIfIdle(q('#status'), job.status);
         setIfIdle(q('#assigned'), job.assigned_to);
         setIfIdle(q('#odoIn'), job.odometer_in);
-        setIfIdle(q('#odoOut'), job.odometer_out);
         setIfIdle(notes, job.tech_notes);
         const v = job.vehicle || {};
         const inVehicleForm = q('#vehicle').contains(document.activeElement);
@@ -909,8 +906,8 @@ async function viewPrint(id) {
       </section>
 
       <table class="ro-strip">
-        <tr><th>Date in</th><th>Odometer in</th><th>Odometer out</th><th>Technician</th><th>Status</th><th>Printed</th></tr>
-        <tr><td>${esc(day(job.invoice_date || job.created_at))}</td><td>${esc(km(job.odometer_in))}</td><td>${esc(km(job.odometer_out))}</td>
+        <tr><th>Date in</th><th>Odometer</th><th>Technician</th><th>Status</th><th>Printed</th></tr>
+        <tr><td>${esc(day(job.invoice_date || job.created_at))}</td><td>${esc(km(job.odometer_in))}</td>
           <td>${esc(nameOf(job.assigned_to))}</td><td>${STATUS[job.status]}</td><td>${esc(day(new Date()))}</td></tr>
       </table>
 
