@@ -300,3 +300,4 @@ input.saved, select.saved, textarea.saved { border-color: var(--ok) !important; 
 .rego-info { margin: 6px 0 0; }
 .rego-info .ok { color: var(--ok); } .rego-info .warn { color: var(--warn); } .rego-info .bad { color: var(--bad); font-weight: 700; }
 .ro .kv-row3 { grid-template-columns: 1.4fr 1fr 1fr; }
+.rego-info .looking { color: var(--accent); }

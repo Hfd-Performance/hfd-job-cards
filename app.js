@@ -564,6 +564,7 @@ async function viewJob(id) {
   const main = shell('Job card', '<p class="muted">Loading…</p>', { back: '#/' });
   let job, tasks = [], docs = [], photos = [], custVehicles = [], library = [];
 
+  let lookupPending = null;   // "574LN2 (QLD)" while a background rego lookup is running
   const loadJob = async () => {
     const { data, error } = await sb.from('jobs').select('*, vehicle:vehicles(*)').eq('id', id).single();
     if (error) throw error;
@@ -708,10 +709,7 @@ async function viewJob(id) {
         <label class="shrink">State<select id="vState">${['QLD', 'NSW', 'VIC', 'SA', 'WA', 'TAS', 'NT', 'ACT'].map((st) => `<option ${(v.state || 'QLD') === st ? 'selected' : ''}>${st}</option>`).join('')}</select></label>
         <button id="vFind" style="align-self:end">Find</button>
       </div>
-      ${v.rego_expiry || v.body_style ? `<p class="small rego-info">${v.rego_expiry ? (() => {
-        const exp = parseDay(v.rego_expiry), days = Math.round((exp - new Date()) / 86400000);
-        return `<span class="${days < 0 ? 'bad' : days < 30 ? 'warn' : 'ok'}">Rego ${days < 0 ? 'expired' : 'expires'} ${exp.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span>`;
-      })() : ''}${v.body_style ? ` · ${esc(v.body_style)}` : ''}</p>` : ''}
+      <p class="small rego-info" id="regoInfo">${regoInfoHtml(v)}</p>
       <div class="grid2" style="margin-top:10px">
         <label class="span2">VIN<input id="vVin" class="mono" value="${esc(v.vin ?? '')}" autocapitalize="characters" autocomplete="off" maxlength="20"></label>
         <p class="small muted span2" id="vinHint" style="margin:-4px 0 0">${esc(vinInfo(v.vin))}</p>
@@ -737,11 +735,11 @@ async function viewJob(id) {
     q('#vehicle').querySelectorAll('button.chip[data-vid]').forEach((b) => { b.onclick = () => { if (b.dataset.vid) linkVehicle(b.dataset.vid); }; });
   }
 
-  async function linkVehicle(vehicleId) {
+  async function linkVehicle(vehicleId, opts = {}) {
     if (!vehicleId) return;
     const { error } = await sb.from('jobs').update({ vehicle_id: vehicleId }).eq('id', id);
     if (error) return fail(error);
-    await afterVehicleChange(true);
+    await afterVehicleChange(true, opts.focusNext !== false);
   }
 
   // map a lookup result onto our vehicle columns (only fields the lookup actually returned)
@@ -759,46 +757,71 @@ async function viewJob(id) {
     return null;
   }
 
+  function regoInfoHtml(v) {
+    if (lookupPending) return `<span class="looking">⏳ Looking up ${esc(lookupPending)}… keep working, details fill in when it arrives (can take ~20 s)</span>`;
+    const bits = [];
+    if (v?.rego_expiry) {
+      const exp = parseDay(v.rego_expiry), days = Math.round((exp - new Date()) / 86400000);
+      bits.push(`<span class="${days < 0 ? 'bad' : days < 30 ? 'warn' : 'ok'}">Rego ${days < 0 ? 'expired' : 'expires'} ${exp.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span>`);
+    }
+    if (v?.body_style) bits.push(esc(v.body_style));
+    return bits.join(' · ');
+  }
+  const refreshRegoInfo = () => { const el = q('#regoInfo'); if (el) el.innerHTML = regoInfoHtml(job.vehicle); };
+
+  // Find: save + link the car instantly, then fill in the details in the background
   async function findRego(input) {
     const rego = normRego(input);
     const state = q('#vState')?.value || 'QLD';
     if (!rego) return toast('Enter a rego');
     const same = rego === job.vehicle?.rego && state === (job.vehicle?.state || 'QLD');
-    if (same && job.vehicle?.vin) return;
-    const btn = q('#vFind'); btn.disabled = true; btn.textContent = '…';
+    if (same && (job.vehicle?.vin || lookupPending)) return;
+    const btn = q('#vFind'); btn.disabled = true;
     try {
-      // 1. seen this car before?
       let { data: veh } = await sb.from('vehicles').select('*').eq('rego', rego).eq('state', state).maybeSingle();
       if (!veh) {
-        // 2. new car: look it up (Australia-wide), then save it
-        const found = await regoLookup(rego, state);
-        const ins = await sb.from('vehicles').insert({
-          rego, state, ...(found ? lookupFields(found.vehicle) : {}),
-          xero_contact_id: job.xero_contact_id, lookup_source: found ? found.source : 'manual', lookup_raw: found?.raw ?? null,
-        }).select('*').single();
+        const ins = await sb.from('vehicles').insert({ rego, state, xero_contact_id: job.xero_contact_id, lookup_source: 'manual' }).select('*').single();
         if (ins.error) throw ins.error;
         veh = ins.data;
-        if (found) toast(`Found: ${[veh.year, veh.make, veh.model].filter(Boolean).join(' ')}`, 'ok');
-      } else {
-        // 3. known car missing its VIN: fill only the blanks (never overwrite what someone typed)
-        const patch = {};
-        if (!veh.vin || !veh.make) {
-          const found = await regoLookup(rego, state);
-          if (found) {
-            Object.entries(lookupFields(found.vehicle)).forEach(([k, v]) => { if (veh[k] == null || veh[k] === '') patch[k] = v; });
-            patch.lookup_source = found.source; patch.lookup_raw = found.raw;
-          }
-        }
-        if (!veh.xero_contact_id && job.xero_contact_id) patch.xero_contact_id = job.xero_contact_id;
-        if (Object.keys(patch).length) {
-          const up = await sb.from('vehicles').update(patch).eq('id', veh.id).select('*').single();
-          if (up.error) throw up.error;
-          veh = up.data;
-          if (patch.vin || patch.make) toast(`Found: ${[veh.year, veh.make, veh.model].filter(Boolean).join(' ')}`, 'ok');
-        }
+      } else if (!veh.xero_contact_id && job.xero_contact_id) {
+        await sb.from('vehicles').update({ xero_contact_id: job.xero_contact_id }).eq('id', veh.id);
       }
-      await linkVehicle(veh.id);
-    } catch (e) { fail(e); } finally { const b2 = q('#vFind'); if (b2) { b2.disabled = false; b2.textContent = 'Find'; } }
+      const needsLookup = !veh.vin || !veh.make;
+      if (needsLookup) lookupPending = `${rego} (${state})`;
+      await linkVehicle(veh.id, { focusNext: !needsLookup });
+      if (needsLookup) backgroundLookup(veh.id, rego, state);
+    } catch (e) { lookupPending = null; refreshRegoInfo(); fail(e); }
+    finally { const b2 = q('#vFind'); if (b2) b2.disabled = false; }
+  }
+
+  async function backgroundLookup(vehicleId, rego, state) {
+    const found = await regoLookup(rego, state);
+    lookupPending = null;
+    try {
+      if (found) {
+        // re-read the car so anything typed while we waited is kept; only blanks get filled
+        const { data: cur } = await sb.from('vehicles').select('*').eq('id', vehicleId).single();
+        const patch = {};
+        Object.entries(lookupFields(found.vehicle)).forEach(([k, v]) => { if (cur[k] == null || cur[k] === '') patch[k] = v; });
+        patch.lookup_source = found.source; patch.lookup_raw = found.raw;
+        const up = await sb.from('vehicles').update(patch).eq('id', vehicleId).select('*').single();
+        if (up.error) throw up.error;
+        if (job.vehicle?.id === vehicleId && q('#vehicle')) {
+          job.vehicle = up.data;
+          // drop the new values into the boxes, without touching one the tech is typing in
+          // fill empty boxes (even the one with the cursor in it, if nothing's been typed there yet)
+          const fillEmpty = (el, val) => { if (el && val != null && el.value === '') el.value = val; };
+          fillEmpty(q('#vVin'), up.data.vin);
+          q('#vehicle').querySelectorAll('input[data-f]').forEach((i) => fillEmpty(i, up.data[i.dataset.f]));
+          const hint = q('#vinHint'); if (hint) hint.textContent = vinInfo(up.data.vin);
+          ['#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]', 'input[data-f=colour]']
+            .forEach((sel) => { const el = q(sel); if (el && patch[sel === '#vVin' ? 'vin' : el.dataset.f] != null) flashSaved(el); });
+        }
+        toast(`Found: ${[up.data.year, up.data.make, up.data.model].filter(Boolean).join(' ')}`, 'ok');
+        if (job.vehicle?.id === vehicleId) await applyRules();
+      }
+    } catch (e) { fail(e); }
+    if (job.vehicle?.id === vehicleId) refreshRegoInfo();
   }
 
   // Saves one vehicle field in the background. Deliberately does NOT redraw the form.
@@ -825,11 +848,11 @@ async function viewJob(id) {
   }
 
   // Only runs when a different vehicle is linked (Find / tapping a customer's car)
-  async function afterVehicleChange(regoChanged) {
+  async function afterVehicleChange(regoChanged, focusNext = true) {
     await loadJob();
     renderVehicle();
-    // carry on to the next empty field
-    const next = ['#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]']
+    // carry on to the next empty field (skipped while a lookup is about to fill them)
+    const next = focusNext && ['#vVin', 'input[data-f=make]', 'input[data-f=model]', 'input[data-f=year]', 'input[data-f=engine]']
       .map((sel) => q(sel)).find((el) => el && !el.value);
     if (next) next.focus();
     await applyRules();
