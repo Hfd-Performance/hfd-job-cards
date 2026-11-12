@@ -238,3 +238,50 @@ input.saved, select.saved, textarea.saved { border-color: var(--ok) !important; 
 
 /* make the hidden attribute always win */
 [hidden] { display: none !important; }
+
+/* ---------------------------------------------------------- calendar */
+.top nav a { min-width: 40px; text-align: center; }
+.sub.booked { color: var(--accent); font-weight: 600; }
+.cal-head { padding: 10px 12px; }
+.cal-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cal-nav button { min-height: 40px; padding: 0 14px; }
+.cal-title { margin: 0 8px; flex: 1; font-size: 16px; white-space: nowrap; }
+.cal-nav select { width: auto; min-height: 40px; }
+.cal-week { display: grid; gap: 8px; }
+.cal-day { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; display: flex; flex-direction: column; gap: 6px; min-height: 80px; transition: background .15s, border-color .15s; }
+.cal-day.today { border-color: var(--accent); box-shadow: inset 0 3px 0 var(--accent); }
+.cal-dhead { display: flex; justify-content: space-between; align-items: baseline; font-size: 14px; color: var(--muted); }
+.cal-dhead b { color: var(--text); font-size: 17px; }
+.cal-day.today .cal-dhead b { color: var(--accent); }
+.cal-list { display: grid; gap: 6px; }
+.cal-add { min-height: 34px; background: transparent; color: var(--muted); border: 1px dashed var(--line); font-weight: 500; font-size: 13px; }
+.cal-add:hover { color: var(--text); border-color: var(--muted); }
+.cal-job { display: block; background: var(--panel2); border: 1px solid var(--line); border-left: 4px solid var(--info); border-radius: 8px; padding: 6px 8px; color: var(--text); text-decoration: none; cursor: grab; }
+.cal-job.st-in_progress { border-left-color: var(--accent); }
+.cal-job.st-waiting_parts { border-left-color: #c084fc; }
+.cal-job.st-complete { border-left-color: var(--ok); opacity: .7; }
+.cal-job.dragging { opacity: .4; }
+.cj-top { display: flex; justify-content: space-between; gap: 6px; font-size: 14px; }
+.cj-time { color: var(--accent); font-weight: 700; font-size: 12px; }
+.cj-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cj-foot { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.cj-tech { font-size: 10px; font-weight: 800; background: var(--line); color: var(--text); border-radius: 10px; padding: 1px 6px; }
+.cj-tech.none { background: transparent; color: var(--muted); }
+.cj-foot .mini-progress { flex: 1; width: auto; height: 4px; display: block; }
+.cj-foot .mini-progress > span { display: block; height: 100%; background: var(--ok); }
+.cj-count { font-size: 11px; color: var(--muted); }
+.drop-hover { background: #26303a !important; border-color: var(--accent) !important; }
+.cal-unbooked-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; }
+@media (min-width: 900px) {
+  main:has(.cal-week) { max-width: 1400px; }
+  .cal-week { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .cal-day { min-height: 340px; }
+  .cal-day.quiet { opacity: .6; }
+}
+@media (max-width: 899px) { .cal-day.quiet { display: none; } }
+@media (max-width: 520px) {
+  .top { gap: 6px; padding-left: 10px; padding-right: 10px; }
+  .top .title { display: none; }
+  .top .brand { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 15px; }
+  .top nav a { padding: 8px 10px; min-width: 0; }
+}

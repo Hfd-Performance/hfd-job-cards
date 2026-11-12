@@ -113,7 +113,7 @@ function shell(title, inner, { back } = {}) {
       ${back ? `<a class="back" href="${back}" aria-label="Back">‹</a>` : ''}
       <a href="#/" class="brand">${esc(settings?.business_name || 'Job Cards')}</a>
       <span class="title">${esc(title)}</span>
-      <nav><a href="#/">Jobs</a><a href="#/settings" aria-label="Settings">⚙</a></nav>
+      <nav><a href="#/">Jobs</a><a href="#/calendar" aria-label="Calendar">📅</a><a href="#/settings" aria-label="Settings">⚙</a></nav>
     </header>
     <main id="main">${inner}</main>`;
   return q('#main');
@@ -145,6 +145,7 @@ async function route() {
     if (parts[0] === 'job' && parts[1]) return await viewJob(parts[1]);
     if (parts[0] === 'print' && parts[1]) return await viewPrint(parts[1]);
     if (parts[0] === 'settings') return await viewSettings(new URLSearchParams(qs || ''));
+    if (parts[0] === 'calendar') return await viewCalendar(new URLSearchParams(qs || ''));
     return await viewHome();
   } catch (e) { fail(e); }
 }
@@ -304,7 +305,7 @@ async function viewHome() {
   let filter = 'active';
   async function loadJobs() {
     const { data, error } = await sb.from('jobs')
-      .select('id, job_number, customer_name, status, change_acknowledged, updated_at, assigned_to, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)')
+      .select('id, job_number, customer_name, status, change_acknowledged, updated_at, assigned_to, booked_date, booked_time, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)')
       .order('updated_at', { ascending: false }).limit(300);
     if (error) return fail(error);
     jobs = data;
@@ -320,7 +321,7 @@ async function viewHome() {
       const done = t.filter((x) => x.done).length;
       const veh = j.vehicle ? [j.vehicle.rego, [j.vehicle.make, j.vehicle.model].filter(Boolean).join(' ')].filter(Boolean).join(' · ') : 'No vehicle yet';
       return `<a class="job-row" href="#/job/${j.id}">
-        <div><div class="num">${esc(j.job_number)}</div><div class="sub">${esc(j.customer_name)}</div><div class="sub">${esc(veh)}</div></div>
+        <div><div class="num">${esc(j.job_number)}</div><div class="sub">${esc(j.customer_name)}</div><div class="sub">${esc(veh)}</div>${j.booked_date ? `<div class="sub booked">${esc(bookedLabel(j))}</div>` : ''}</div>
         <div class="right">
           <span class="badge ${j.status}">${STATUS[j.status]}</span>
           ${j.change_acknowledged ? '' : '<span class="badge alert">Invoice changed</span>'}
@@ -343,6 +344,177 @@ async function viewHome() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, debounce(loadJobs, 500))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'job_tasks' }, debounce(loadJobs, 800))
     .subscribe();
+  cleanup.push(() => sb.removeChannel(ch));
+}
+
+// ------------------------------------------------------------ calendar
+const isoDay = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
+const parseDay = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const mondayOf = (d) => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); const wd = (x.getDay() + 6) % 7; return addDays(x, -wd); };
+const fmtTimeOfDay = (t) => {
+  if (!t) return '';
+  const [h, m] = t.split(':').map(Number);
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')}${h < 12 ? 'am' : 'pm'}`;
+};
+const bookedLabel = (j) => j.booked_date
+  ? `📅 ${parseDay(j.booked_date).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}${j.booked_time ? ` ${fmtTimeOfDay(j.booked_time)}` : ''}`
+  : '';
+const initials = (id) => (nameOf(id) || '').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+
+async function viewCalendar(params) {
+  const anchor = params.get('d') ? parseDay(params.get('d')) : new Date();
+  const start = mondayOf(anchor);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  const todayIso = isoDay(new Date());
+  let techFilter = '';
+  try { techFilter = localStorage.getItem('cal_tech') || ''; } catch { /* storage off */ }
+
+  const main = shell('Calendar', `
+    <section class="card cal-head">
+      <div class="cal-nav">
+        <button class="ghost" id="calPrev" aria-label="Previous week">‹</button>
+        <button class="ghost" id="calToday">Today</button>
+        <button class="ghost" id="calNext" aria-label="Next week">›</button>
+        <h2 class="cal-title">${days[0].toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</h2>
+        <select id="calTech"><option value="">All techs</option>${profiles.map((p) => `<option value="${p.id}" ${techFilter === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select>
+      </div>
+    </section>
+    <div class="cal-week" id="calWeek"></div>
+    <section class="card cal-unbooked" id="calUnbooked" data-day=""></section>`);
+
+  const go = (d) => { location.hash = `#/calendar?d=${isoDay(d)}`; };
+  q('#calPrev').onclick = () => go(addDays(start, -7));
+  q('#calNext').onclick = () => go(addDays(start, 7));
+  q('#calToday').onclick = () => go(new Date());
+  q('#calTech').onchange = (e) => { techFilter = e.target.value; try { localStorage.setItem('cal_tech', techFilter); } catch { /* */ } render(); };
+
+  let booked = [], unbooked = [];
+  const cols = 'id, job_number, customer_name, status, assigned_to, booked_date, booked_time, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)';
+  async function load() {
+    const [a, b] = await Promise.all([
+      sb.from('jobs').select(cols).gte('booked_date', isoDay(days[0])).lte('booked_date', isoDay(days[6])).order('booked_time', { nullsFirst: true }),
+      sb.from('jobs').select(cols).is('booked_date', null).neq('status', 'complete').order('updated_at', { ascending: false }).limit(60),
+    ]);
+    if (a.error) return fail(a.error);
+    booked = a.data ?? []; unbooked = b.data ?? [];
+    render();
+  }
+
+  const chip = (j) => {
+    const t = (j.job_tasks || []).filter((x) => !x.removed_from_invoice);
+    const done = t.filter((x) => x.done).length;
+    const veh = j.vehicle ? [j.vehicle.rego, j.vehicle.model].filter(Boolean).join(' · ') : '';
+    return `<a class="cal-job st-${j.status}" href="#/job/${j.id}" draggable="true" data-id="${j.id}">
+      <div class="cj-top"><b>${esc(j.job_number)}</b>${j.booked_time ? `<span class="cj-time">${fmtTimeOfDay(j.booked_time)}</span>` : ''}</div>
+      <div class="cj-sub">${esc(j.customer_name || '')}</div>
+      ${veh ? `<div class="cj-sub">${esc(veh)}</div>` : ''}
+      <div class="cj-foot">${j.assigned_to ? `<span class="cj-tech" title="${esc(nameOf(j.assigned_to))}">${esc(initials(j.assigned_to))}</span>` : '<span class="cj-tech none">–</span>'}
+        <span class="mini-progress"><span style="width:${t.length ? (done / t.length) * 100 : 0}%"></span></span><span class="cj-count">${done}/${t.length}</span></div>
+    </a>`;
+  };
+
+  function render() {
+    const show = (j) => !techFilter || j.assigned_to === techFilter;
+    q('#calWeek').innerHTML = days.map((d) => {
+      const iso = isoDay(d);
+      const list = booked.filter((j) => j.booked_date === iso && show(j));
+      return `<div class="cal-day ${iso === todayIso ? 'today' : ''} ${d.getDay() === 0 && !list.length ? 'quiet' : ''}" data-day="${iso}">
+        <div class="cal-dhead"><span>${d.toLocaleDateString('en-AU', { weekday: 'short' })} <b>${d.getDate()}</b></span>
+          <span class="muted small">${list.length ? `${list.length} job${list.length > 1 ? 's' : ''}` : ''}</span></div>
+        <div class="cal-list">${list.map(chip).join('')}</div>
+        <button class="cal-add" data-add="${iso}">+ Book</button>
+      </div>`;
+    }).join('');
+    const ub = unbooked.filter(show);
+    q('#calUnbooked').innerHTML = `<h3>Not booked yet <span class="muted small">(${ub.length})</span></h3>
+      <p class="small muted" style="margin:-6px 0 8px">Drag onto a day (computer/tablet), or open the job and set its booking date.</p>
+      <div class="cal-unbooked-list">${ub.map(chip).join('') || '<span class="muted small">Every open job is booked in.</span>'}</div>`;
+    q('#calWeek').querySelectorAll('[data-add]').forEach((b) => { b.onclick = () => openBookModal(b.dataset.add); });
+  }
+
+  // --- drag to reschedule (mouse / tablet with drag support)
+  main.addEventListener('dragstart', (e) => {
+    const c = e.target.closest('.cal-job'); if (!c) return;
+    e.dataTransfer.setData('text/plain', c.dataset.id); e.dataTransfer.effectAllowed = 'move';
+    c.classList.add('dragging');
+  });
+  main.addEventListener('dragend', (e) => { e.target.closest?.('.cal-job')?.classList.remove('dragging'); });
+  main.addEventListener('dragover', (e) => {
+    const zone = e.target.closest('[data-day]'); if (!zone) return;
+    e.preventDefault(); main.querySelectorAll('.drop-hover').forEach((z) => z !== zone && z.classList.remove('drop-hover')); zone.classList.add('drop-hover');
+  });
+  main.addEventListener('dragleave', (e) => { const zone = e.target.closest('[data-day]'); if (zone && !zone.contains(e.relatedTarget)) zone.classList.remove('drop-hover'); });
+  main.addEventListener('drop', async (e) => {
+    const zone = e.target.closest('[data-day]'); if (!zone) return;
+    e.preventDefault(); zone.classList.remove('drop-hover');
+    const id = e.dataTransfer.getData('text/plain'); if (!id) return;
+    const day = zone.dataset.day || null;
+    const patch = day ? { booked_date: day } : { booked_date: null, booked_time: null };
+    const { error } = await sb.from('jobs').update(patch).eq('id', id);
+    if (error) return fail(error);
+    toast(day ? `Moved to ${parseDay(day).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}` : 'Removed from the calendar', 'ok', 1800);
+    load();
+  });
+
+  // --- book a job onto a day
+  async function openBookModal(dayIso) {
+    const ov = document.createElement('div');
+    ov.className = 'modal';
+    const dayLabel = parseDay(dayIso).toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' });
+    ov.innerHTML = `<form class="modal-card" id="bookForm">
+      <h3>Book a job: ${esc(dayLabel)}</h3>
+      <label>Job<select name="pick" required><option value="">Loading…</option></select></label>
+      <div class="grid2">
+        <label>Time (optional)<input name="time" type="time" step="900"></label>
+        <label>Tech<select name="tech"><option value="">Unassigned</option>${profiles.map((p) => `<option value="${p.id}" ${techFilter === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></label>
+      </div>
+      <p class="small muted" id="bookMsg" style="margin:4px 0 0"></p>
+      <div class="actions" style="margin-top:10px"><button id="bookSave">Book it</button><button type="button" class="ghost" data-x>Cancel</button></div>
+    </form>`;
+    document.body.appendChild(ov);
+    const f = q('#bookForm', ov);
+    ov.addEventListener('click', (e) => { if (e.target === ov || e.target.dataset.x !== undefined) ov.remove(); });
+    let invoices = [];
+    const fill = () => {
+      const unb = unbooked.map((j) => `<option value="job:${j.id}">${esc(j.job_number)} · ${esc(j.customer_name || '')}</option>`).join('');
+      const inv = invoices.filter((i) => !i.job_id).map((i, n) => `<option value="inv:${n}">${esc(i.number)} · ${esc(i.customer)}</option>`).join('');
+      f.pick.innerHTML = `<option value="">Choose a job or invoice…</option>`
+        + (unb ? `<optgroup label="Job cards not booked yet">${unb}</optgroup>` : '')
+        + (inv ? `<optgroup label="Xero invoices (creates the job card)">${inv}</optgroup>` : '');
+    };
+    fill();
+    fn('xero', '/invoices', { query: { search: '' } })
+      .then((r) => {
+        invoices = r.invoices.map((i) => ({ ...i }));
+        const keep = f.pick.value; fill(); f.pick.value = keep;
+      })
+      .catch((e) => { q('#bookMsg', ov).textContent = `Xero invoices unavailable (${e.message}); existing job cards are listed.`; });
+
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = f.pick.value; if (!v) return;
+      const btn = q('#bookSave', ov); btn.disabled = true; btn.textContent = 'Booking…';
+      try {
+        let jobId;
+        if (v.startsWith('job:')) jobId = v.slice(4);
+        else {
+          const inv = invoices[Number(v.slice(4))];
+          jobId = (await fn('xero', '/sync', { method: 'POST', body: { invoice_id: inv.invoice_id } })).job_id;
+        }
+        const patch = { booked_date: dayIso, booked_time: f.time.value || null };
+        if (f.tech.value) patch.assigned_to = f.tech.value;
+        const { error } = await sb.from('jobs').update(patch).eq('id', jobId);
+        if (error) throw error;
+        ov.remove(); toast('Booked in', 'ok'); load();
+      } catch (err) { fail(err); btn.disabled = false; btn.textContent = 'Book it'; }
+    };
+  }
+
+  await load();
+  // on phones the week is a long list: jump to today
+  if (window.innerWidth < 900) q('.cal-day.today')?.scrollIntoView({ block: 'start' });
+  const ch = sb.channel('calendar').on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, debounce(load, 500)).subscribe();
   cleanup.push(() => sb.removeChannel(ch));
 }
 
@@ -429,6 +601,8 @@ async function viewJob(id) {
       <div class="grid2" style="margin-top:12px">
         <label>Status<select id="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${job.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tech<select id="assigned"><option value="">Unassigned</option>${profiles.map((p) => `<option value="${p.id}" ${job.assigned_to === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></label>
+        <label>Booked in (date)<input id="bookDate" type="date" value="${job.booked_date ?? ''}"></label>
+        <label>Time<input id="bookTime" type="time" step="900" value="${(job.booked_time ?? '').slice(0, 5)}"></label>
         <label class="span2">Odometer (km)<input id="odoIn" type="number" inputmode="numeric" value="${job.odometer_in ?? ''}"></label>
       </div>`;
     const save = async (patch, el) => {
@@ -441,6 +615,9 @@ async function viewJob(id) {
     q('#assigned').onchange = (e) => save({ assigned_to: e.target.value || null }, e.target);
     const odo = (v) => (v === '' ? null : Math.max(0, parseInt(v, 10) || 0));
     q('#odoIn').onchange = (e) => save({ odometer_in: odo(e.target.value) }, e.target);
+    q('#bookDate').onchange = (e) => save(e.target.value ? { booked_date: e.target.value } : { booked_date: null, booked_time: null }, e.target)
+      .then(() => { if (!e.target.value) q('#bookTime').value = ''; });
+    q('#bookTime').onchange = (e) => save({ booked_time: e.target.value || null }, e.target);
   }
   function updateBadge() {
     const b = q('#head .badge');
@@ -896,6 +1073,8 @@ async function viewJob(id) {
         setIfIdle(q('#status'), job.status);
         setIfIdle(q('#assigned'), job.assigned_to);
         setIfIdle(q('#odoIn'), job.odometer_in);
+        setIfIdle(q('#bookDate'), job.booked_date);
+        setIfIdle(q('#bookTime'), (job.booked_time ?? '').slice(0, 5));
         setIfIdle(notes, job.tech_notes);
         const v = job.vehicle || {};
         const inVehicleForm = q('#vehicle').contains(document.activeElement);
@@ -998,7 +1177,7 @@ async function viewPrint(id) {
 
       <table class="ro-strip">
         <tr><th>Date in</th><th>Odometer</th><th>Technician</th><th>Status</th><th>Printed</th></tr>
-        <tr><td>${esc(day(job.invoice_date || job.created_at))}</td><td>${esc(km(job.odometer_in))}</td>
+        <tr><td>${esc(day(job.booked_date || job.invoice_date || job.created_at))}</td><td>${esc(km(job.odometer_in))}</td>
           <td>${esc(nameOf(job.assigned_to))}</td><td>${STATUS[job.status]}</td><td>${esc(day(new Date()))}</td></tr>
       </table>
 
