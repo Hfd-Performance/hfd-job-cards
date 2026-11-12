@@ -703,10 +703,15 @@ async function viewJob(id) {
     const v = job.vehicle || {};
     const others = custVehicles.filter((x) => x.id !== v.id);
     q('#vehicle').innerHTML = `
-      <div class="row">
-        <label>Rego (QLD)<input id="vRego" class="big mono" data-vid="${esc(v.id ?? '')}" value="${esc(v.rego ?? '')}" autocapitalize="characters" autocomplete="off" enterkeyhint="search"></label>
+      <div class="row rego-row">
+        <label>Rego<input id="vRego" class="big mono" data-vid="${esc(v.id ?? '')}" value="${esc(v.rego ?? '')}" autocapitalize="characters" autocomplete="off" enterkeyhint="search"></label>
+        <label class="shrink">State<select id="vState">${['QLD', 'NSW', 'VIC', 'SA', 'WA', 'TAS', 'NT', 'ACT'].map((st) => `<option ${(v.state || 'QLD') === st ? 'selected' : ''}>${st}</option>`).join('')}</select></label>
         <button id="vFind" style="align-self:end">Find</button>
       </div>
+      ${v.rego_expiry || v.body_style ? `<p class="small rego-info">${v.rego_expiry ? (() => {
+        const exp = parseDay(v.rego_expiry), days = Math.round((exp - new Date()) / 86400000);
+        return `<span class="${days < 0 ? 'bad' : days < 30 ? 'warn' : 'ok'}">Rego ${days < 0 ? 'expired' : 'expires'} ${exp.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span>`;
+      })() : ''}${v.body_style ? ` · ${esc(v.body_style)}` : ''}</p>` : ''}
       <div class="grid2" style="margin-top:10px">
         <label class="span2">VIN<input id="vVin" class="mono" value="${esc(v.vin ?? '')}" autocapitalize="characters" autocomplete="off" maxlength="20"></label>
         <p class="small muted span2" id="vinHint" style="margin:-4px 0 0">${esc(vinInfo(v.vin))}</p>
@@ -738,36 +743,61 @@ async function viewJob(id) {
     await afterVehicleChange(true);
   }
 
+  // map a lookup result onto our vehicle columns (only fields the lookup actually returned)
+  const lookupFields = (v) => {
+    const out = { vin: v.vin, make: v.make, model: v.model, year: v.year, engine: v.engine, colour: v.colour, body_style: v.body, rego_expiry: v.expiry };
+    Object.keys(out).forEach((k) => { if (out[k] == null || out[k] === '') delete out[k]; });
+    return out;
+  };
+  async function regoLookup(rego, state) {
+    try {
+      const r = await fn('rego-lookup', '', { method: 'POST', body: { rego, state } });
+      if (r.ok) return r;
+      if (r.reason === 'not_found') toast(`${rego} (${state}) wasn't found. Check the rego and state, or enter the details manually.`, 'error', 6000);
+    } catch (e) { toast(`Rego lookup unavailable: ${e.message}`, 'error', 6000); }
+    return null;
+  }
+
   async function findRego(input) {
     const rego = normRego(input);
+    const state = q('#vState')?.value || 'QLD';
     if (!rego) return toast('Enter a rego');
-    if (rego === job.vehicle?.rego) return;
+    const same = rego === job.vehicle?.rego && state === (job.vehicle?.state || 'QLD');
+    if (same && job.vehicle?.vin) return;
     const btn = q('#vFind'); btn.disabled = true; btn.textContent = '…';
     try {
       // 1. seen this car before?
-      let { data: veh } = await sb.from('vehicles').select('*').eq('rego', rego).maybeSingle();
-      // 2. otherwise try the lookup service (off until a provider is set up)
+      let { data: veh } = await sb.from('vehicles').select('*').eq('rego', rego).eq('state', state).maybeSingle();
       if (!veh) {
-        let found = null;
-        try {
-          const r = await fn('rego-lookup', '', { method: 'POST', body: { rego, state: 'QLD' } });
-          if (r.ok) found = r;
-          else if (r.reason === 'not_found') toast('Rego not found by lookup service, enter VIN manually');
-        } catch (e) { console.warn('rego lookup failed', e); }
-        const v = found?.vehicle ?? {};
+        // 2. new car: look it up (Australia-wide), then save it
+        const found = await regoLookup(rego, state);
         const ins = await sb.from('vehicles').insert({
-          rego, state: 'QLD', vin: v.vin ?? null, make: v.make ?? null, model: v.model ?? null,
-          year: v.year ?? null, engine: v.engine ?? null, colour: v.colour ?? null,
+          rego, state, ...(found ? lookupFields(found.vehicle) : {}),
           xero_contact_id: job.xero_contact_id, lookup_source: found ? found.source : 'manual', lookup_raw: found?.raw ?? null,
         }).select('*').single();
         if (ins.error) throw ins.error;
         veh = ins.data;
-        if (found) toast(`Found ${[v.make, v.model].filter(Boolean).join(' ')}`, 'ok');
-      } else if (!veh.xero_contact_id && job.xero_contact_id) {
-        await sb.from('vehicles').update({ xero_contact_id: job.xero_contact_id }).eq('id', veh.id);
+        if (found) toast(`Found: ${[veh.year, veh.make, veh.model].filter(Boolean).join(' ')}`, 'ok');
+      } else {
+        // 3. known car missing its VIN: fill only the blanks (never overwrite what someone typed)
+        const patch = {};
+        if (!veh.vin || !veh.make) {
+          const found = await regoLookup(rego, state);
+          if (found) {
+            Object.entries(lookupFields(found.vehicle)).forEach(([k, v]) => { if (veh[k] == null || veh[k] === '') patch[k] = v; });
+            patch.lookup_source = found.source; patch.lookup_raw = found.raw;
+          }
+        }
+        if (!veh.xero_contact_id && job.xero_contact_id) patch.xero_contact_id = job.xero_contact_id;
+        if (Object.keys(patch).length) {
+          const up = await sb.from('vehicles').update(patch).eq('id', veh.id).select('*').single();
+          if (up.error) throw up.error;
+          veh = up.data;
+          if (patch.vin || patch.make) toast(`Found: ${[veh.year, veh.make, veh.model].filter(Boolean).join(' ')}`, 'ok');
+        }
       }
       await linkVehicle(veh.id);
-    } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = 'Find'; }
+    } catch (e) { fail(e); } finally { const b2 = q('#vFind'); if (b2) { b2.disabled = false; b2.textContent = 'Find'; } }
   }
 
   // Saves one vehicle field in the background. Deliberately does NOT redraw the form.
@@ -1240,7 +1270,7 @@ async function viewPrint(id) {
           <div class="kv-row">${kv('Rego', v.rego, 'big')}${kv('Year', v.year)}</div>
           ${kv('Make / model', [v.make, v.model].filter(Boolean).join(' '), 'wide')}
           ${kv('VIN', v.vin, 'mono wide')}
-          <div class="kv-row">${kv('Engine', v.engine)}${kv('Colour', v.colour)}</div>
+          <div class="kv-row kv-row3">${kv('Engine', v.engine)}${kv('Colour', v.colour)}${kv('Rego expiry', v.rego_expiry ? day(v.rego_expiry) : '')}</div>
         </div>
       </section>
 

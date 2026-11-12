@@ -295,3 +295,8 @@ input.saved, select.saved, textarea.saved { border-color: var(--ok) !important; 
 .cj-top { align-items: center; min-width: 0; }
 .cj-top b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cj-top .cj-span, .cj-top .cj-time { flex: 0 0 auto; }
+/* rego row */
+.rego-row select { width: 92px; }
+.rego-info { margin: 6px 0 0; }
+.rego-info .ok { color: var(--ok); } .rego-info .warn { color: var(--warn); } .rego-info .bad { color: var(--bad); font-weight: 700; }
+.ro .kv-row3 { grid-template-columns: 1.4fr 1fr 1fr; }
