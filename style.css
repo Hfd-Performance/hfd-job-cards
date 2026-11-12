@@ -285,3 +285,13 @@ input.saved, select.saved, textarea.saved { border-color: var(--ok) !important; 
   .top .brand { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 15px; }
   .top nav a { padding: 8px 10px; min-width: 0; }
 }
+/* multi-day bookings */
+.cj-span { font-size: 11px; font-weight: 700; color: #1a1300; background: var(--accent); border-radius: 8px; padding: 0 6px; white-space: nowrap; }
+.cal-job.multi { background: linear-gradient(90deg, rgba(245,165,36,.10), var(--panel2) 60%); }
+.cal-job.cont { border-left-style: dashed; }
+/* keep job cards inside their day column */
+.cal-day, .cal-list { min-width: 0; }
+.cal-job { min-width: 0; overflow: hidden; }
+.cj-top { align-items: center; min-width: 0; }
+.cj-top b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cj-top .cj-span, .cj-top .cj-time { flex: 0 0 auto; }

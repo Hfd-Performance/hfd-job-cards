@@ -305,7 +305,7 @@ async function viewHome() {
   let filter = 'active';
   async function loadJobs() {
     const { data, error } = await sb.from('jobs')
-      .select('id, job_number, customer_name, status, change_acknowledged, updated_at, assigned_to, booked_date, booked_time, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)')
+      .select('id, job_number, customer_name, status, change_acknowledged, updated_at, assigned_to, booked_date, booked_end_date, booked_time, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)')
       .order('updated_at', { ascending: false }).limit(300);
     if (error) return fail(error);
     jobs = data;
@@ -357,9 +357,27 @@ const fmtTimeOfDay = (t) => {
   const [h, m] = t.split(':').map(Number);
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')}${h < 12 ? 'am' : 'pm'}`;
 };
-const bookedLabel = (j) => j.booked_date
-  ? `📅 ${parseDay(j.booked_date).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}${j.booked_time ? ` ${fmtTimeOfDay(j.booked_time)}` : ''}`
-  : '';
+const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
+// Mon–Fri days from a to b inclusive (ISO strings)
+function workingDaysBetween(aIso, bIso) {
+  let n = 0;
+  for (let d = parseDay(aIso), end = parseDay(bIso); d <= end; d = addDays(d, 1)) if (!isWeekend(d)) n++;
+  return Math.max(n, 1);
+}
+// the date that is n working days after d (n = 0 → d itself, moved off a weekend)
+function addWorkingDays(d, n) {
+  let x = new Date(d);
+  while (isWeekend(x)) x = addDays(x, 1);
+  while (n > 0) { x = addDays(x, 1); if (!isWeekend(x)) n--; }
+  return x;
+}
+const shortDay = (iso) => parseDay(iso).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
+const isMultiDay = (j) => j.booked_end_date && j.booked_end_date !== j.booked_date;
+const bookedLabel = (j) => {
+  if (!j.booked_date) return '';
+  if (isMultiDay(j)) return `📅 ${shortDay(j.booked_date)} → ${shortDay(j.booked_end_date)} (${workingDaysBetween(j.booked_date, j.booked_end_date)} working days)`;
+  return `📅 ${shortDay(j.booked_date)}${j.booked_time ? ` ${fmtTimeOfDay(j.booked_time)}` : ''}`;
+};
 const initials = (id) => (nameOf(id) || '').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 
 async function viewCalendar(params) {
@@ -390,10 +408,19 @@ async function viewCalendar(params) {
   q('#calTech').onchange = (e) => { techFilter = e.target.value; try { localStorage.setItem('cal_tech', techFilter); } catch { /* */ } render(); };
 
   let booked = [], unbooked = [];
-  const cols = 'id, job_number, customer_name, status, assigned_to, booked_date, booked_time, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)';
+  const cols = 'id, job_number, customer_name, status, assigned_to, booked_date, booked_end_date, booked_time, vehicle:vehicles(rego, make, model), job_tasks(done, removed_from_invoice)';
+  const wkStart = isoDay(days[0]), wkEnd = isoDay(days[6]);
+  // single-day jobs show on their day; ranges show on Mon–Fri only
+  const onDay = (j, d) => {
+    const iso = isoDay(d), start = j.booked_date, end = j.booked_end_date || start;
+    if (!start || iso < start || iso > end) return false;
+    return !(isMultiDay(j) && isWeekend(d));
+  };
   async function load() {
     const [a, b] = await Promise.all([
-      sb.from('jobs').select(cols).gte('booked_date', isoDay(days[0])).lte('booked_date', isoDay(days[6])).order('booked_time', { nullsFirst: true }),
+      sb.from('jobs').select(cols).not('booked_date', 'is', null).lte('booked_date', wkEnd)
+        .or(`booked_end_date.gte.${wkStart},and(booked_end_date.is.null,booked_date.gte.${wkStart})`)
+        .order('booked_time', { nullsFirst: true }),
       sb.from('jobs').select(cols).is('booked_date', null).neq('status', 'complete').order('updated_at', { ascending: false }).limit(60),
     ]);
     if (a.error) return fail(a.error);
@@ -401,12 +428,17 @@ async function viewCalendar(params) {
     render();
   }
 
-  const chip = (j) => {
+  const chip = (j, d) => {
     const t = (j.job_tasks || []).filter((x) => !x.removed_from_invoice);
     const done = t.filter((x) => x.done).length;
     const veh = j.vehicle ? [j.vehicle.rego, j.vehicle.model].filter(Boolean).join(' · ') : '';
-    return `<a class="cal-job st-${j.status}" href="#/job/${j.id}" draggable="true" data-id="${j.id}">
-      <div class="cj-top"><b>${esc(j.job_number)}</b>${j.booked_time ? `<span class="cj-time">${fmtTimeOfDay(j.booked_time)}</span>` : ''}</div>
+    const iso = d ? isoDay(d) : null;
+    const multi = isMultiDay(j);
+    const first = !iso || iso === j.booked_date;
+    const span = multi && iso ? `<span class="cj-span">Day ${workingDaysBetween(j.booked_date, iso)}/${workingDaysBetween(j.booked_date, j.booked_end_date)}</span>` : '';
+    const time = first && j.booked_time ? `<span class="cj-time">${fmtTimeOfDay(j.booked_time)}</span>` : '';
+    return `<a class="cal-job st-${j.status} ${multi ? 'multi' : ''} ${multi && !first ? 'cont' : ''}" href="#/job/${j.id}" draggable="true" data-id="${j.id}">
+      <div class="cj-top"><b>${esc(j.job_number)}</b>${span || time}</div>
       <div class="cj-sub">${esc(j.customer_name || '')}</div>
       ${veh ? `<div class="cj-sub">${esc(veh)}</div>` : ''}
       <div class="cj-foot">${j.assigned_to ? `<span class="cj-tech" title="${esc(nameOf(j.assigned_to))}">${esc(initials(j.assigned_to))}</span>` : '<span class="cj-tech none">–</span>'}
@@ -418,18 +450,19 @@ async function viewCalendar(params) {
     const show = (j) => !techFilter || j.assigned_to === techFilter;
     q('#calWeek').innerHTML = days.map((d) => {
       const iso = isoDay(d);
-      const list = booked.filter((j) => j.booked_date === iso && show(j));
+      const list = booked.filter((j) => onDay(j, d) && show(j))
+        .sort((a, b) => (isMultiDay(b) - isMultiDay(a)) || String(a.booked_time ?? '').localeCompare(String(b.booked_time ?? '')));
       return `<div class="cal-day ${iso === todayIso ? 'today' : ''} ${d.getDay() === 0 && !list.length ? 'quiet' : ''}" data-day="${iso}">
         <div class="cal-dhead"><span>${d.toLocaleDateString('en-AU', { weekday: 'short' })} <b>${d.getDate()}</b></span>
           <span class="muted small">${list.length ? `${list.length} job${list.length > 1 ? 's' : ''}` : ''}</span></div>
-        <div class="cal-list">${list.map(chip).join('')}</div>
+        <div class="cal-list">${list.map((j) => chip(j, d)).join('')}</div>
         <button class="cal-add" data-add="${iso}">+ Book</button>
       </div>`;
     }).join('');
     const ub = unbooked.filter(show);
     q('#calUnbooked').innerHTML = `<h3>Not booked yet <span class="muted small">(${ub.length})</span></h3>
       <p class="small muted" style="margin:-6px 0 8px">Drag onto a day (computer/tablet), or open the job and set its booking date.</p>
-      <div class="cal-unbooked-list">${ub.map(chip).join('') || '<span class="muted small">Every open job is booked in.</span>'}</div>`;
+      <div class="cal-unbooked-list">${ub.map((j) => chip(j)).join('') || '<span class="muted small">Every open job is booked in.</span>'}</div>`;
     q('#calWeek').querySelectorAll('[data-add]').forEach((b) => { b.onclick = () => openBookModal(b.dataset.add); });
   }
 
@@ -450,7 +483,14 @@ async function viewCalendar(params) {
     e.preventDefault(); zone.classList.remove('drop-hover');
     const id = e.dataTransfer.getData('text/plain'); if (!id) return;
     const day = zone.dataset.day || null;
-    const patch = day ? { booked_date: day } : { booked_date: null, booked_time: null };
+    const j = [...booked, ...unbooked].find((x) => x.id === id);
+    let patch;
+    if (!day) patch = { booked_date: null, booked_end_date: null, booked_time: null };
+    else if (j && isMultiDay(j)) {
+      const n = workingDaysBetween(j.booked_date, j.booked_end_date);
+      const s = addWorkingDays(parseDay(day), 0);
+      patch = { booked_date: isoDay(s), booked_end_date: isoDay(addWorkingDays(s, n - 1)) };
+    } else patch = { booked_date: day, booked_end_date: null };
     const { error } = await sb.from('jobs').update(patch).eq('id', id);
     if (error) return fail(error);
     toast(day ? `Moved to ${parseDay(day).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' })}` : 'Removed from the calendar', 'ok', 1800);
@@ -466,6 +506,7 @@ async function viewCalendar(params) {
       <h3>Book a job: ${esc(dayLabel)}</h3>
       <label>Job<select name="pick" required><option value="">Loading…</option></select></label>
       <div class="grid2">
+        <label>Out date (optional)<input name="end" type="date" min="${dayIso}"></label>
         <label>Time (optional)<input name="time" type="time" step="900"></label>
         <label>Tech<select name="tech"><option value="">Unassigned</option>${profiles.map((p) => `<option value="${p.id}" ${techFilter === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></label>
       </div>
@@ -502,7 +543,7 @@ async function viewCalendar(params) {
           const inv = invoices[Number(v.slice(4))];
           jobId = (await fn('xero', '/sync', { method: 'POST', body: { invoice_id: inv.invoice_id } })).job_id;
         }
-        const patch = { booked_date: dayIso, booked_time: f.time.value || null };
+        const patch = { booked_date: dayIso, booked_time: f.time.value || null, booked_end_date: f.end.value && f.end.value > dayIso ? f.end.value : null };
         if (f.tech.value) patch.assigned_to = f.tech.value;
         const { error } = await sb.from('jobs').update(patch).eq('id', jobId);
         if (error) throw error;
@@ -601,9 +642,11 @@ async function viewJob(id) {
       <div class="grid2" style="margin-top:12px">
         <label>Status<select id="status">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${job.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
         <label>Tech<select id="assigned"><option value="">Unassigned</option>${profiles.map((p) => `<option value="${p.id}" ${job.assigned_to === p.id ? 'selected' : ''}>${esc(p.display_name)}</option>`).join('')}</select></label>
-        <label>Booked in (date)<input id="bookDate" type="date" value="${job.booked_date ?? ''}"></label>
-        <label>Time<input id="bookTime" type="time" step="900" value="${(job.booked_time ?? '').slice(0, 5)}"></label>
-        <label class="span2">Odometer (km)<input id="odoIn" type="number" inputmode="numeric" value="${job.odometer_in ?? ''}"></label>
+        <label>In (date)<input id="bookDate" type="date" value="${job.booked_date ?? ''}"></label>
+        <label>Out (date)<input id="bookEnd" type="date" value="${job.booked_end_date ?? ''}" min="${job.booked_date ?? ''}"></label>
+        <p class="span2 small muted" id="bookHint" style="margin:-4px 0 0"></p>
+        <label>Drop-off time<input id="bookTime" type="time" step="900" value="${(job.booked_time ?? '').slice(0, 5)}"></label>
+        <label>Odometer (km)<input id="odoIn" type="number" inputmode="numeric" value="${job.odometer_in ?? ''}"></label>
       </div>`;
     const save = async (patch, el) => {
       const { error } = await sb.from('jobs').update(patch).eq('id', id);
@@ -615,8 +658,33 @@ async function viewJob(id) {
     q('#assigned').onchange = (e) => save({ assigned_to: e.target.value || null }, e.target);
     const odo = (v) => (v === '' ? null : Math.max(0, parseInt(v, 10) || 0));
     q('#odoIn').onchange = (e) => save({ odometer_in: odo(e.target.value) }, e.target);
-    q('#bookDate').onchange = (e) => save(e.target.value ? { booked_date: e.target.value } : { booked_date: null, booked_time: null }, e.target)
-      .then(() => { if (!e.target.value) q('#bookTime').value = ''; });
+    const bookHint = () => {
+      const el = q('#bookHint'); if (!el) return;
+      el.textContent = isMultiDay(job) ? `${workingDaysBetween(job.booked_date, job.booked_end_date)} working days (weekends skipped)` : '';
+      q('#bookEnd').min = job.booked_date ?? '';
+    };
+    bookHint();
+    q('#bookDate').onchange = async (e) => {
+      const v = e.target.value;
+      let patch;
+      if (!v) patch = { booked_date: null, booked_end_date: null, booked_time: null };
+      else {
+        patch = { booked_date: v };
+        if (job.booked_end_date && job.booked_end_date <= v) patch.booked_end_date = null;   // out date before in → clear it
+      }
+      await save(patch, e.target);
+      if (!v) { q('#bookTime').value = ''; }
+      if (!job.booked_end_date) q('#bookEnd').value = '';
+      bookHint();
+    };
+    q('#bookEnd').onchange = async (e) => {
+      const v = e.target.value;
+      if (v && !job.booked_date) { e.target.value = ''; return toast('Set the In date first', 'error'); }
+      if (v && v < job.booked_date) { e.target.value = job.booked_end_date ?? ''; return toast('Out date can\'t be before the In date', 'error'); }
+      await save({ booked_end_date: v && v !== job.booked_date ? v : null }, e.target);
+      if (!job.booked_end_date) e.target.value = '';
+      bookHint();
+    };
     q('#bookTime').onchange = (e) => save({ booked_time: e.target.value || null }, e.target);
   }
   function updateBadge() {
@@ -1074,6 +1142,7 @@ async function viewJob(id) {
         setIfIdle(q('#assigned'), job.assigned_to);
         setIfIdle(q('#odoIn'), job.odometer_in);
         setIfIdle(q('#bookDate'), job.booked_date);
+        setIfIdle(q('#bookEnd'), job.booked_end_date);
         setIfIdle(q('#bookTime'), (job.booked_time ?? '').slice(0, 5));
         setIfIdle(notes, job.tech_notes);
         const v = job.vehicle || {};
@@ -1176,8 +1245,8 @@ async function viewPrint(id) {
       </section>
 
       <table class="ro-strip">
-        <tr><th>Date in</th><th>Odometer</th><th>Technician</th><th>Status</th><th>Printed</th></tr>
-        <tr><td>${esc(day(job.booked_date || job.invoice_date || job.created_at))}</td><td>${esc(km(job.odometer_in))}</td>
+        <tr><th>Date in</th><th>Date out</th><th>Odometer</th><th>Technician</th><th>Status</th><th>Printed</th></tr>
+        <tr><td>${esc(day(job.booked_date || job.invoice_date || job.created_at))}</td><td>${esc(day(job.booked_end_date))}</td><td>${esc(km(job.odometer_in))}</td>
           <td>${esc(nameOf(job.assigned_to))}</td><td>${STATUS[job.status]}</td><td>${esc(day(new Date()))}</td></tr>
       </table>
 
