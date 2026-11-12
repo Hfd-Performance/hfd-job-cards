@@ -1,0 +1,9 @@
+{
+  "name": "HFD Job Cards",
+  "short_name": "Job Cards",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#14171c",
+  "theme_color": "#14171c",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
