@@ -1235,5 +1235,20 @@ async function viewSettings(params) {
   await renderStaff();
 }
 
+// ------------------------------------------------------------ auto-update
+// Phones keep old copies of the app; check for a newer version and reload when one is live.
+const MY_VERSION = document.querySelector('meta[name=app-version]')?.content;
+async function checkForUpdate() {
+  try {
+    const html = await (await fetch(`index.html?check=${Date.now()}`, { cache: 'no-store' })).text();
+    const live = /name="app-version" content="([^"]+)"/.exec(html)?.[1];
+    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+    if (live && MY_VERSION && live !== MY_VERSION && !typing && !document.querySelector('.modal, .lightbox')) location.reload();
+  } catch { /* offline: try later */ }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+setInterval(checkForUpdate, 5 * 60 * 1000);
+
 // ------------------------------------------------------------ go
 route();
+checkForUpdate();
