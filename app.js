@@ -1103,23 +1103,75 @@ async function viewJob(id) {
     if (ok) toast(`${ok} photo${ok > 1 ? 's' : ''} added`, 'ok');
     await loadPhotos(); renderPhotos();
   }
-  function lightbox(p) {
+  // Full-screen photo viewer: fits the screen, tap to zoom, arrows / swipe / keys to move between photos
+  function lightbox(start) {
+    let i = Math.max(0, photos.indexOf(start));
     const box = document.createElement('div');
     box.className = 'lightbox';
-    box.innerHTML = `<img src="${esc(p.url)}" alt="">
-      <div class="bar"><span class="small muted">${esc(nameOf(p.uploaded_by))} · ${fmtTime(p.created_at)}</span>
-      <span class="actions"><button class="ghost" data-a="cap">Caption</button>${canDeletePhoto(p) ? '<button class="danger" data-a="del">Delete</button>' : ''}<button data-a="x">Close</button></span></div>`;
+    box.innerHTML = `
+      <div class="lb-top"><span class="small" id="lbCount"></span><button class="lb-x" data-a="x" aria-label="Close">✕</button></div>
+      <div class="lb-stage" id="lbStage"><img id="lbImg" alt=""></div>
+      <button class="lb-nav lb-prev" data-a="prev" aria-label="Previous photo">‹</button>
+      <button class="lb-nav lb-next" data-a="next" aria-label="Next photo">›</button>
+      <div class="bar"><span class="small muted" id="lbMeta"></span>
+        <span class="actions"><button class="ghost" data-a="cap">Caption</button><span id="lbDel"></span><button data-a="x">Close</button></span></div>`;
     document.body.appendChild(box);
+    const stage = q('#lbStage', box), img = q('#lbImg', box);
+    const show = () => {
+      const p = photos[i];
+      if (!p) { box.remove(); return; }
+      box.classList.remove('zoomed');
+      img.src = p.url ?? '';
+      q('#lbCount', box).textContent = photos.length > 1 ? `${i + 1} of ${photos.length}` : '';
+      q('#lbMeta', box).textContent = [p.caption, nameOf(p.uploaded_by), fmtTime(p.created_at)].filter(Boolean).join(' · ');
+      q('#lbDel', box).innerHTML = canDeletePhoto(p) ? '<button class="danger" data-a="del">Delete</button>' : '';
+      box.querySelectorAll('.lb-nav').forEach((n) => { n.hidden = photos.length < 2; });
+    };
+    const go = (d) => { if (photos.length > 1) { i = (i + d + photos.length) % photos.length; show(); } };
+    const close = () => { box.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close();
+      else if (e.key === 'ArrowRight') go(1);
+      else if (e.key === 'ArrowLeft') go(-1);
+    };
+    document.addEventListener('keydown', onKey);
+
+    // tap the photo to zoom in on the spot you tapped; tap again to fit the screen
+    img.onclick = (e) => {
+      if (box.classList.contains('zoomed')) { box.classList.remove('zoomed'); return; }
+      const r = img.getBoundingClientRect();
+      const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+      box.classList.add('zoomed');
+      requestAnimationFrame(() => {
+        stage.scrollLeft = fx * img.offsetWidth - stage.clientWidth / 2;
+        stage.scrollTop = fy * img.offsetHeight - stage.clientHeight / 2;
+      });
+    };
+    // swipe left/right on a phone (only when not zoomed)
+    let sx = null;
+    stage.addEventListener('touchstart', (e) => { sx = e.touches.length === 1 && !box.classList.contains('zoomed') ? e.touches[0].clientX : null; }, { passive: true });
+    stage.addEventListener('touchend', (e) => {
+      if (sx == null) return;
+      const dx = e.changedTouches[0].clientX - sx; sx = null;
+      if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+    });
+
     box.onclick = async (e) => {
-      const a = e.target.dataset.a;
-      if (a === 'x' || e.target === box) box.remove();
+      const a = e.target.closest('[data-a]')?.dataset.a;
+      if (a === 'x' || e.target === box || e.target === stage) return close();
+      if (a === 'prev') return go(-1);
+      if (a === 'next') return go(1);
+      const p = photos[i];
       if (a === 'cap') {
         const c = prompt('Caption', p.caption ?? ''); if (c === null) return;
         await sb.from('job_photos').update({ caption: c.trim() || null }).eq('id', p.id);
-        p.caption = c.trim(); toast('Saved', 'ok', 1200);
+        p.caption = c.trim(); show(); toast('Saved', 'ok', 1200);
       }
-      if (a === 'del') await deletePhoto(p, box);
+      if (a === 'del') {
+        if (await deletePhoto(p)) { if (!photos.length) close(); else { i = Math.min(i, photos.length - 1); show(); } }
+      }
     };
+    show();
   }
 
   // ---------------- notes (autosave)
