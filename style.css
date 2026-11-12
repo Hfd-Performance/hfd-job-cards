@@ -229,3 +229,9 @@ button.icon { min-height: 40px; width: 40px; padding: 0; background: transparent
 
 /* quiet "saved" confirmation on the field itself */
 input.saved, select.saved, textarea.saved { border-color: var(--ok) !important; box-shadow: 0 0 0 3px rgba(60,207,122,.28); transition: box-shadow .3s, border-color .3s; }
+
+/* photo tiles with delete */
+.photos .ph { position: relative; }
+.photos .ph img { display: block; }
+.ph-del { position: absolute; top: 4px; right: 4px; min-height: 0; width: 34px; height: 34px; padding: 0; border-radius: 50%;
+  background: rgba(0,0,0,.65); color: #fff; font-size: 16px; border: 1px solid rgba(255,255,255,.25); }

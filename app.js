@@ -684,11 +684,27 @@ async function viewJob(id) {
   // ---------------- photos
   function renderPhotos() {
     q('#photos').innerHTML = `<div class="photos">
-      ${photos.map((p, i) => `<img src="${esc(p.url ?? '')}" data-i="${i}" alt="${esc(p.caption ?? 'photo')}" loading="lazy">`).join('')}
+      ${photos.map((p, i) => `<div class="ph">
+        <img src="${esc(p.url ?? '')}" data-i="${i}" alt="${esc(p.caption ?? 'photo')}" loading="lazy">
+        ${canDeletePhoto(p) ? `<button class="ph-del" data-del="${i}" title="Delete photo" aria-label="Delete photo">🗑</button>` : ''}
+      </div>`).join('')}
       <label class="add-photo">📷<br>Add photos<input type="file" id="photoIn" accept="image/*" multiple></label>
     </div>`;
     q('#photoIn').onchange = (e) => uploadPhotos([...e.target.files]);
     q('#photos').querySelectorAll('img').forEach((img) => { img.onclick = () => lightbox(photos[img.dataset.i]); });
+    q('#photos').querySelectorAll('[data-del]').forEach((b) => { b.onclick = () => deletePhoto(photos[b.dataset.del]); });
+  }
+  const canDeletePhoto = (p) => me.is_admin || p.uploaded_by === me.id;
+  async function deletePhoto(p, box) {
+    if (!confirm('Delete this photo? This can\'t be undone.')) return false;
+    const { data, error } = await sb.from('job_photos').delete().eq('id', p.id).select('id');
+    if (error) { fail(error); return false; }
+    if (!data?.length) { toast('Only an admin or the person who took it can delete this photo', 'error'); return false; }
+    await sb.storage.from('job-photos').remove([p.storage_path]);
+    box?.remove();
+    toast('Photo deleted', 'ok', 1500);
+    await loadPhotos(); renderPhotos();
+    return true;
   }
   async function uploadPhotos(files) {
     if (!files.length) return;
@@ -713,7 +729,7 @@ async function viewJob(id) {
     box.className = 'lightbox';
     box.innerHTML = `<img src="${esc(p.url)}" alt="">
       <div class="bar"><span class="small muted">${esc(nameOf(p.uploaded_by))} · ${fmtTime(p.created_at)}</span>
-      <span class="actions"><button class="ghost" data-a="cap">Caption</button><button class="danger" data-a="del">Delete</button><button data-a="x">Close</button></span></div>`;
+      <span class="actions"><button class="ghost" data-a="cap">Caption</button>${canDeletePhoto(p) ? '<button class="danger" data-a="del">Delete</button>' : ''}<button data-a="x">Close</button></span></div>`;
     document.body.appendChild(box);
     box.onclick = async (e) => {
       const a = e.target.dataset.a;
@@ -723,12 +739,7 @@ async function viewJob(id) {
         await sb.from('job_photos').update({ caption: c.trim() || null }).eq('id', p.id);
         p.caption = c.trim(); toast('Saved', 'ok', 1200);
       }
-      if (a === 'del' && confirm('Delete this photo?')) {
-        await sb.storage.from('job-photos').remove([p.storage_path]);
-        const { error } = await sb.from('job_photos').delete().eq('id', p.id);
-        if (error) return fail(error);
-        box.remove(); await loadPhotos(); renderPhotos();
-      }
+      if (a === 'del') await deletePhoto(p, box);
     };
   }
 
@@ -999,8 +1010,16 @@ async function viewSettings(params) {
       Matching is "contains", not case sensitive. Commas mean OR, <b>&</b> means AND. Leave one side blank to match anything.</p>
       <div id="rules"></div>
     </section>
-    <section class="card"><h2>Staff</h2><div id="staff"></div>
-      <p class="small muted">To add a tech: Supabase dashboard → Authentication → Users → <b>Invite user</b>. They show up here after accepting.</p>
+    <section class="card"><h2>Staff logins</h2><div id="staff"></div>
+      <form id="staffForm" class="grid2" style="margin-top:14px">
+        <h3 class="span2" style="margin:0">Add a staff member</h3>
+        <label>Name<input name="display_name" required placeholder="e.g. Jake"></label>
+        <label>Email (their login)<input name="email" type="email" required autocomplete="off"></label>
+        <label class="span2">Password<div class="row"><input name="password" required minlength="8" autocomplete="new-password" class="mono"><button type="button" class="ghost" id="genPw">Generate</button></div></label>
+        <label class="span2 check-row" style="margin-top:0"><input type="checkbox" name="is_admin"> Admin (can change settings, rules, delete jobs and any photo)</label>
+        <button class="span2">Create login</button>
+        <div class="span2" id="newLogin"></div>
+      </form>
     </section>
     ${signOut}`;
   q('#signout').onclick = () => sb.auth.signOut();
@@ -1155,20 +1174,61 @@ async function viewSettings(params) {
   }
 
   // ---- staff
+  const genPassword = () => {
+    const words = ['diesel', 'turbo', 'boost', 'torque', 'piston', 'clutch', 'gasket', 'nozzle', 'intake', 'spanner'];
+    const a = new Uint32Array(3); crypto.getRandomValues(a);
+    return `${words[a[0] % words.length]}-${words[a[1] % words.length]}-${1000 + (a[2] % 9000)}`;
+  };
   async function renderStaff() {
     profiles = (await sb.from('profiles').select('*').order('display_name')).data ?? [];
+    let emails = {};
+    try { (await fn('staff', '/list')).users.forEach((x) => { emails[x.id] = x; }); } catch (e) { console.warn(e); }
     q('#staff').innerHTML = `<table class="tbl">${profiles.map((p) => `<tr>
-      <td><input data-name="${p.id}" value="${esc(p.display_name ?? '')}"></td>
-      <td style="white-space:nowrap"><label style="display:flex;gap:8px;align-items:center;color:var(--text)"><input type="checkbox" data-admin="${p.id}" style="width:22px;min-height:0" ${p.is_admin ? 'checked' : ''} ${p.id === me.id ? 'disabled' : ''}> Admin</label></td></tr>`).join('')}</table>`;
+      <td style="min-width:140px"><input data-name="${p.id}" value="${esc(p.display_name ?? '')}">
+        <div class="small muted" style="margin-top:4px">${esc(emails[p.id]?.email ?? '')}${emails[p.id] ? ` · ${emails[p.id].last_sign_in_at ? `last in ${fmtTime(emails[p.id].last_sign_in_at)}` : 'never signed in'}` : ''}</div></td>
+      <td style="white-space:nowrap">
+        <label style="display:flex;gap:8px;align-items:center;color:var(--text);margin-bottom:6px"><input type="checkbox" data-admin="${p.id}" style="width:22px;min-height:0" ${p.is_admin ? 'checked' : ''} ${p.id === me.id ? 'disabled' : ''}> Admin</label>
+        <button type="button" class="ghost" data-pw="${p.id}" style="min-height:36px">Reset password</button>
+        ${p.id === me.id ? '' : `<button type="button" class="danger" data-rm="${p.id}" style="min-height:36px">Remove</button>`}
+      </td></tr>`).join('')}</table>`;
     q('#staff').querySelectorAll('[data-name]').forEach((i) => i.onchange = async () => {
       const { error } = await sb.from('profiles').update({ display_name: i.value.trim() }).eq('id', i.dataset.name);
-      if (error) return fail(error); toast('Saved', 'ok', 1200);
+      if (error) return fail(error); flashSaved(i);
     });
     q('#staff').querySelectorAll('[data-admin]').forEach((i) => i.onchange = async () => {
       const { error } = await sb.from('profiles').update({ is_admin: i.checked }).eq('id', i.dataset.admin);
       if (error) return fail(error); toast('Saved', 'ok', 1200);
     });
+    q('#staff').querySelectorAll('[data-pw]').forEach((b) => b.onclick = async () => {
+      const p = profiles.find((x) => x.id === b.dataset.pw);
+      const pw = prompt(`New password for ${p.display_name} (8+ characters)`, genPassword());
+      if (!pw) return;
+      try { await fn('staff', '/password', { method: 'POST', body: { user_id: p.id, password: pw } }); toast(`Password changed for ${p.display_name}: ${pw}`, 'ok', 9000); }
+      catch (e) { fail(e); }
+    });
+    q('#staff').querySelectorAll('[data-rm]').forEach((b) => b.onclick = async () => {
+      const p = profiles.find((x) => x.id === b.dataset.rm);
+      if (!confirm(`Remove ${p.display_name}'s login? Their ticks and photos stay on the jobs.`)) return;
+      try { await fn('staff', '/remove', { method: 'POST', body: { user_id: p.id } }); toast('Login removed', 'ok'); renderStaff(); }
+      catch (e) { fail(e); }
+    });
   }
+  const sf = q('#staffForm');
+  q('#genPw').onclick = () => { sf.password.value = genPassword(); };
+  sf.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { display_name: sf.display_name.value.trim(), email: sf.email.value.trim(), password: sf.password.value, is_admin: sf.is_admin.checked };
+    const btn = sf.querySelector('button:not([type])'); btn.disabled = true;
+    try {
+      await fn('staff', '/create', { method: 'POST', body });
+      q('#newLogin').innerHTML = `<div class="card" style="border-color:var(--ok)">
+        <b>✓ Login created for ${esc(body.display_name)}.</b> Give them:<br>
+        Web address: <b>${esc(location.origin + location.pathname)}</b><br>
+        Email: <b>${esc(body.email)}</b><br>Password: <b class="mono">${esc(body.password)}</b></div>`;
+      sf.reset();
+      await renderStaff();
+    } catch (err) { fail(err); } finally { btn.disabled = false; }
+  };
 
   await renderLib();
   await renderRules();
