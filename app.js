@@ -44,7 +44,7 @@ function flashSaved(el) {
 const fail = (e) => { console.error(e); toast(e?.message ?? String(e), 'error', 5000); };
 
 // call an edge function
-async function fn(name, path = '', { method = 'GET', body, query } = {}) {
+async function fn(name, path = '', { method = 'GET', body, query } = {}, retried = false) {
   const { data: { session } } = await sb.auth.getSession();
   const url = new URL(`${CONFIG.SUPABASE_URL}/functions/v1/${name}${path}`);
   if (query) Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, v));
@@ -58,6 +58,16 @@ async function fn(name, path = '', { method = 'GET', body, query } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const out = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // stale login: refresh once, otherwise go back to the sign-in screen
+    if (!retried) {
+      const { data, error } = await sb.auth.refreshSession();
+      if (!error && data.session) return fn(name, path, { method, body, query }, true);
+    }
+    toast('Your login has expired. Please sign in again.', 'error', 6000);
+    await sb.auth.signOut();
+    throw new Error('Please sign in again');
+  }
   if (!res.ok) throw new Error(out.error || `Error ${res.status}`);
   return out;
 }
@@ -139,7 +149,15 @@ async function route() {
   } catch (e) { fail(e); }
 }
 window.addEventListener('hashchange', route);
-sb.auth.onAuthStateChange((event) => { if (event === 'SIGNED_OUT') { me = null; route(); } });
+sb.auth.onAuthStateChange((event, session) => {
+  if (event === 'SIGNED_OUT') { me = null; route(); return; }
+  // someone signed in as a different person in another tab of this browser: switch to match
+  if (me && session?.user && session.user.id !== me.id) {
+    me = null;
+    toast(`Now signed in as ${session.user.email}`, 'info', 5000);
+    setTimeout(route, 0);
+  }
+});
 
 // ------------------------------------------------------------ login
 function viewLogin() {
