@@ -306,6 +306,7 @@ async function viewJob(id) {
     <section class="actions">
       <a href="#/print/${id}"><button class="ghost" type="button">🖨 Print job card</button></a>
       <button class="ghost" id="resync" type="button">↻ Refresh from Xero</button>
+      ${me.is_admin ? '<button class="danger" id="deleteJob" type="button">🗑 Delete job card</button>' : ''}
     </section>`;
 
   // ---------------- banner (invoice changed)
@@ -613,6 +614,21 @@ async function viewJob(id) {
     }
   }
   q('#resync').onclick = () => syncNow(true);
+
+  // ---------------- delete (admin only; the Xero invoice is not touched)
+  const delBtn = q('#deleteJob');
+  if (delBtn) delBtn.onclick = async () => {
+    if (!confirm(`Delete job card ${job.job_number}?\n\nThis removes its checklist, notes and ${photos.length} photo(s). The Xero invoice is NOT changed, and you can make a fresh job card from it later.`)) return;
+    delBtn.disabled = true;
+    try {
+      if (photos.length) await sb.storage.from('job-photos').remove(photos.map((p) => p.storage_path));
+      const { data, error } = await sb.from('jobs').delete().eq('id', id).select('id');
+      if (error) throw error;
+      if (!data?.length) throw new Error('Only an admin can delete job cards');
+      toast(`Job card ${job.job_number} deleted`, 'ok');
+      location.hash = '#/';
+    } catch (e) { fail(e); delBtn.disabled = false; }
+  };
 
   renderBanner(); renderHead(); renderVehicle(); renderTasks(); renderDocs(); renderPhotos();
   syncNow(false);
