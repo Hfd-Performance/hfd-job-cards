@@ -524,16 +524,135 @@ async function viewJob(id) {
     const avail = library.filter((d) => !attached.has(d.id));
     q('#docs').innerHTML = `
       <div class="docs">${docs.length ? docs.map((d) => `
-        <a class="doc" href="${esc(d.url ?? '#')}" target="_blank" rel="noopener">
-          <span class="ico">📄</span><span class="t">${esc(d.title)}<div class="s">${d.rule_id ? 'Added automatically' : 'Added manually'}${d.description ? ` · ${esc(d.description)}` : ''}</div></span><span>›</span>
-        </a>`).join('') : '<p class="muted small">No documents for this job yet. Rules add them automatically once the vehicle is set.</p>'}</div>
-      ${avail.length ? `<div class="row" style="margin-top:8px"><select id="docAdd"><option value="">Attach a document…</option>${avail.map((d) => `<option value="${d.id}">${esc(d.title)}</option>`).join('')}</select></div>` : ''}`;
+        <div class="doc">
+          <a class="doc-link" href="${esc(d.url ?? '#')}" target="_blank" rel="noopener">
+            <span class="ico">📄</span><span class="t">${esc(d.title)}<div class="s">${d.rule_id ? 'Added automatically' : 'Added manually'}${d.description ? ` · ${esc(d.description)}` : ''}</div></span>
+          </a>
+          <button class="icon" data-unlink="${d.id}" title="Remove from this job">✕</button>
+        </div>`).join('') : '<p class="muted small">No documents for this job yet. Rules add them automatically once the vehicle is set.</p>'}</div>
+      <div class="row" style="margin-top:8px">
+        <label class="ghost-btn shrink">📎 Add document<input type="file" id="docFile" accept="application/pdf,image/*" hidden></label>
+        ${avail.length ? `<select id="docAdd"><option value="">…or attach from library</option>${avail.map((d) => `<option value="${d.id}">${esc(d.title)}</option>`).join('')}</select>` : ''}
+      </div>`;
     const s = q('#docAdd');
     if (s) s.onchange = async () => {
       if (!s.value) return;
       const { error } = await sb.from('job_docs').insert({ job_id: id, doc_id: s.value, added_by: me.id });
       if (error) return fail(error);
       await loadDocs(); renderDocs();
+    };
+    q('#docFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openDocModal(f); };
+    q('#docs').querySelectorAll('[data-unlink]').forEach((b) => b.onclick = async () => {
+      const d = docs.find((x) => x.id === b.dataset.unlink);
+      if (!confirm(`Remove "${d.title}" from this job? (It stays in the document library.)`)) return;
+      const { error } = await sb.from('job_docs').delete().eq('job_id', id).eq('doc_id', d.id);
+      if (error) return fail(error);
+      await loadDocs(); renderDocs();
+    });
+  }
+
+  // Suggest a vehicle match like "landcruiser&79" from "LandCruiser 79 GXL"
+  function suggestVehicleMatch(v) {
+    const model = (v?.model || '').toLowerCase().trim();
+    if (!model) return (v?.make || '').toLowerCase();
+    const words = model.split(/\s+/);
+    const num = words.find((w) => /\d/.test(w));
+    return num && words[0] !== num ? `${words[0]}&${num}` : words[0];
+  }
+  // Keyword chips from the invoice lines ("clutch", "injectors", …)
+  function workKeywords() {
+    const stop = new Set(['supply', 'fit', 'fitted', 'fitting', 'labour', 'labor', 'and', 'the', 'with', 'for', 'replace', 'replacement', 'install', 'kit', 'new', 'service', 'parts', 'part', 'hours', 'hour', 'remove', 'check', 'from', 'heavy', 'duty']);
+    const seen = new Map();
+    tasks.filter((t) => t.source !== 'rule' && !t.removed_from_invoice).forEach((t) =>
+      t.description.toLowerCase().split(/[^a-z0-9]+/).forEach((w) => {
+        if (w.length >= 4 && !stop.has(w) && !/^\d+$/.test(w)) seen.set(w, (seen.get(w) || 0) + 1);
+      }));
+    return [...seen.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([w]) => w);
+  }
+
+  function openDocModal(file) {
+    const v = job.vehicle || {};
+    const title = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    const chips = workKeywords();
+    const ov = document.createElement('div');
+    ov.className = 'modal';
+    ov.innerHTML = `<form class="modal-card" id="docForm">
+      <h3>Add document to ${esc(job.job_number)}</h3>
+      <p class="small muted" style="margin:0 0 10px">📄 ${esc(file.name)} · ${(file.size / 1048576).toFixed(1)} MB</p>
+      <div class="grid2">
+        <label class="span2">Title<input name="title" required value="${esc(title)}"></label>
+        <label class="span2">Description (optional)<input name="description" placeholder="e.g. Flywheel 120 Nm, pressure plate 19 Nm"></label>
+      </div>
+      ${me.is_admin ? `
+      <label class="check-row"><input type="checkbox" name="mkrule"> Attach automatically to future jobs (make a rule)</label>
+      <div class="rule-fields" hidden>
+        <div class="grid2">
+          <label>Vehicle contains<input name="vehicle_match" value="${esc(suggestVehicleMatch(v))}" placeholder="e.g. 79 series, lc79, vdj79"></label>
+          <label>Work contains<input name="job_match" placeholder="e.g. clutch"></label>
+        </div>
+        ${chips.length ? `<div class="chips">${chips.map((c) => `<button type="button" class="chip" data-kw="${esc(c)}">+ ${esc(c)}</button>`).join('')}</div>` : ''}
+        <label style="margin-top:8px">Also add these check items (one per line, optional)<textarea name="extra_tasks" placeholder="Torque flywheel bolts to spec&#10;Torque pressure plate bolts to spec"></textarea></label>
+        <p class="small muted" style="margin:6px 0 0">Matching is "contains", not case sensitive. Commas mean OR, <b>&amp;</b> means AND.
+          This vehicle is <b>${esc([v.make, v.model].filter(Boolean).join(' ') || 'not set yet')}</b>.</p>
+      </div>` : ''}
+      <div class="actions" style="margin-top:12px"><button id="docSave">Save document</button><button type="button" class="ghost" data-x>Cancel</button></div>
+    </form>`;
+    document.body.appendChild(ov);
+    const f = q('#docForm', ov);
+    const close = () => ov.remove();
+    ov.addEventListener('click', (e) => { if (e.target === ov || e.target.dataset.x !== undefined) close(); });
+    if (f.mkrule) f.mkrule.onchange = () => { q('.rule-fields', ov).hidden = !f.mkrule.checked; };
+    ov.querySelectorAll('[data-kw]').forEach((b) => b.onclick = () => {
+      const cur = f.job_match.value.split(',').map((x) => x.trim()).filter(Boolean);
+      if (!cur.includes(b.dataset.kw)) cur.push(b.dataset.kw);
+      f.job_match.value = cur.join(', ');
+    });
+
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const mkRule = !!f.mkrule?.checked;
+      const rule = mkRule ? {
+        vehicle_match: f.vehicle_match.value.trim() || null,
+        job_match: f.job_match.value.trim() || null,
+        extra_tasks: f.extra_tasks.value.split('\n').map((x) => x.trim()).filter(Boolean),
+      } : null;
+      if (rule && !rule.vehicle_match && !rule.job_match) return toast('Give the rule a vehicle or work condition', 'error');
+      const btn = q('#docSave', ov); btn.disabled = true; btn.textContent = 'Uploading…';
+      try {
+        const ext = (file.name.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '') || 'pdf';
+        const path = `${crypto.randomUUID()}.${ext}`;
+        const up = await sb.storage.from('tech-docs').upload(path, file, { contentType: file.type || 'application/pdf' });
+        if (up.error) throw up.error;
+        const ins = await sb.from('tech_docs').insert({
+          title: f.title.value.trim(), description: f.description.value.trim() || null, storage_path: path, uploaded_by: me.id,
+        }).select('id').single();
+        if (ins.error) throw ins.error;
+        const docId = ins.data.id;
+        const link = await sb.from('job_docs').insert({ job_id: id, doc_id: docId, added_by: me.id });
+        if (link.error) throw link.error;
+
+        let msg = 'Document added';
+        if (rule) {
+          const r = await sb.from('doc_rules').insert({
+            name: f.title.value.trim(), vehicle_match: rule.vehicle_match, job_match: rule.job_match,
+            doc_id: docId, extra_tasks: rule.extra_tasks.length ? rule.extra_tasks : null,
+          });
+          if (r.error) throw r.error;
+          // run it on every open job (adds this job's check items + catches other matching jobs)
+          const { data: open } = await sb.from('jobs').select('id').neq('status', 'complete');
+          let others = 0;
+          for (const j of open ?? []) {
+            const { data: n } = await sb.rpc('apply_doc_rules', { p_job: j.id });
+            if (j.id !== id && n > 0) others++;
+          }
+          msg = `Document added and rule saved${others ? `, also attached to ${others} other open job${others > 1 ? 's' : ''}` : ''}`;
+        }
+        library = (await sb.from('tech_docs').select('id, title').order('title')).data ?? [];
+        await Promise.all([loadDocs(), loadTasks()]);
+        renderDocs(); renderTasks();
+        toast(msg, 'ok', 5000);
+        close();
+      } catch (err) { fail(err); btn.disabled = false; btn.textContent = 'Save document'; }
     };
   }
 
@@ -650,39 +769,143 @@ async function viewJob(id) {
   cleanup.push(() => sb.removeChannel(ch));
 }
 
-// ------------------------------------------------------------ print view (no prices)
+// ------------------------------------------------------------ print view: dealership-style repair order (no prices)
+const C39 = {"0":"nnnwwnwnn","1":"wnnwnnnnw","2":"nnwwnnnnw","3":"wnwwnnnnn","4":"nnnwwnnnw","5":"wnnwwnnnn","6":"nnwwwnnnn","7":"nnnwnnwnw","8":"wnnwnnwnn","9":"nnwwnnwnn","A":"wnnnnwnnw","B":"nnwnnwnnw","C":"wnwnnwnnn","D":"nnnnwwnnw","E":"wnnnwwnnn","F":"nnwnwwnnn","G":"nnnnnwwnw","H":"wnnnnwwnn","I":"nnwnnwwnn","J":"nnnnwwwnn","K":"wnnnnnnww","L":"nnwnnnnww","M":"wnwnnnnwn","N":"nnnnwnnww","O":"wnnnwnnwn","P":"nnwnwnnwn","Q":"nnnnnnwww","R":"wnnnnnwwn","S":"nnwnnnwwn","T":"nnnnwnwwn","U":"wwnnnnnnw","V":"nwwnnnnnw","W":"wwwnnnnnn","X":"nwnnwnnnw","Y":"wwnnwnnnn","Z":"nwwnwnnnn","-":"nwnnnnwnw",".":"wwnnnnwnn"," ":"nwwnnnwnn","$":"nwnwnwnnn","/":"nwnwnnnwn","+":"nwnnnwnwn","%":"nnnwnwnwn","*":"nwnnwnwnn"};
+function code39Svg(text, height = 34) {
+  const s = `*${String(text).toUpperCase().replace(/[^0-9A-Z\-. $/+%]/g, '-')}*`;
+  const N = 1.2, W = 3;                       // narrow / wide module widths
+  let x = 0, bars = '';
+  for (const ch of s) {
+    const p = C39[ch];
+    for (let i = 0; i < 9; i++) {
+      const w = p[i] === 'w' ? W : N;
+      if (i % 2 === 0) bars += `<rect x="${x.toFixed(1)}" y="0" width="${w}" height="${height}"/>`;
+      x += w;
+    }
+    x += N;                                   // gap between characters
+  }
+  return `<svg class="ro-barcode" viewBox="0 0 ${x.toFixed(1)} ${height}" width="${(x * 0.9).toFixed(0)}" height="${height}" preserveAspectRatio="none" aria-label="${esc(text)}">${bars}</svg>`;
+}
+
+const DEFAULT_TERMS = 'I authorise the work listed above to be carried out, along with any road testing required. '
+  + 'The workshop is not responsible for loss or damage to vehicles or articles left in vehicles in case of fire, theft or any cause beyond our control.';
+
 async function viewPrint(id) {
-  const [{ data: job, error }, { data: tasks }, { data: jd }, { count: photoCount }] = await Promise.all([
+  const [{ data: job, error }, { data: tasks }, { data: jd }, { data: photoRows }] = await Promise.all([
     sb.from('jobs').select('*, vehicle:vehicles(*)').eq('id', id).single(),
     sb.from('job_tasks').select('*').eq('job_id', id).eq('removed_from_invoice', false).order('sort').order('created_at'),
     sb.from('job_docs').select('doc:tech_docs(title)').eq('job_id', id),
-    sb.from('job_photos').select('id', { count: 'exact', head: true }).eq('job_id', id),
+    sb.from('job_photos').select('*').eq('job_id', id).order('created_at'),
   ]);
   if (error) throw error;
+  const s = settings || {};
   const v = job.vehicle || {};
-  const main = shell(`Print ${job.job_number}`, '', { back: `#/job/${id}` });
+  const ops = tasks ?? [];
+  const photos = photoRows ?? [];
+  const [logoRes, photoRes] = await Promise.all([
+    s.logo_path ? sb.storage.from('tech-docs').createSignedUrl(s.logo_path, 3600) : Promise.resolve({ data: null }),
+    photos.length ? sb.storage.from('job-photos').createSignedUrls(photos.map((p) => p.storage_path), 3600) : Promise.resolve({ data: [] }),
+  ]);
+  const logoUrl = logoRes.data?.signedUrl;
+  const photoUrl = (p) => (photoRes.data ?? []).find((u) => u.path === p.storage_path)?.signedUrl;
+
+  const kv = (label, value, cls = '') => `<div class="kv ${cls}"><span>${label}</span><b>${value ? esc(value) : '&nbsp;'}</b></div>`;
+  const km = (n) => (n != null ? `${Number(n).toLocaleString('en-AU')} km` : '');
+  const day = (d) => (d ? new Date(d).toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' }) : '');
+  const contact = [s.business_address, s.business_phone ? `Ph ${s.business_phone}` : '', s.business_email, s.business_abn ? `ABN ${s.business_abn}` : ''].filter(Boolean);
+  const done = ops.filter((t) => t.done).length;
+  const docs = (jd ?? []).map((d) => d.doc?.title).filter(Boolean);
+
+  const main = shell(`Repair order ${job.job_number}`, '', { back: `#/job/${id}` });
   main.innerHTML = `
-    <div class="print-tools"><button onclick="window.print()">🖨 Print</button><a href="#/job/${id}"><button class="ghost">Back to job</button></a></div>
-    <div class="print-page">
-      <div class="ph">
-        <div><h1>${esc(settings?.business_name ?? '')}</h1><div>JOB CARD</div></div>
-        <div><div class="jn">${esc(job.job_number)}</div><div style="text-align:right">${fmtDate(job.invoice_date || job.created_at)}</div></div>
-      </div>
-      <table>
-        <tr><th>Customer</th><td>${esc(job.customer_name)}</td><th>Phone</th><td>${esc(job.customer_phone ?? '')}</td></tr>
-        <tr><th>Rego</th><td><b>${esc(v.rego ?? '')}</b></td><th>VIN</th><td class="mono">${esc(v.vin ?? '')}</td></tr>
-        <tr><th>Vehicle</th><td>${esc([v.year, v.make, v.model].filter(Boolean).join(' '))}</td><th>Engine</th><td>${esc(v.engine ?? '')}</td></tr>
-        <tr><th>Odo in</th><td>${job.odometer_in != null ? `${job.odometer_in.toLocaleString('en-AU')} km` : ''}</td><th>Odo out</th><td>${job.odometer_out != null ? `${job.odometer_out.toLocaleString('en-AU')} km` : ''}</td></tr>
-        <tr><th>Tech</th><td>${esc(nameOf(job.assigned_to))}</td><th>Status</th><td>${STATUS[job.status]}</td></tr>
+    <div class="print-tools">
+      <button onclick="window.print()">🖨 Print / save PDF</button>
+      <label class="pt-opt"><input type="checkbox" id="optTicks" checked> Show completed ticks</label>
+      <label class="pt-opt"><input type="checkbox" id="optPhotos" ${photos.length ? '' : 'disabled'}> Include photos (${photos.length})</label>
+      <a href="#/job/${id}"><button class="ghost" type="button">Back to job</button></a>
+    </div>
+    <div class="ro-wrap"><article class="ro" id="ro">
+      <header class="ro-head">
+        <div class="ro-biz">
+          ${logoUrl ? `<img class="ro-logo" src="${esc(logoUrl)}" alt="">` : ''}
+          <div>
+            <div class="ro-bizname">${esc(s.business_name || '')}</div>
+            ${contact.map((c) => `<div class="ro-contact">${esc(c)}</div>`).join('')}
+          </div>
+        </div>
+        <div class="ro-id">
+          <div class="ro-title">REPAIR ORDER</div>
+          <div class="ro-num">${esc(job.job_number)}</div>
+          ${code39Svg(job.job_number)}
+        </div>
+      </header>
+
+      <section class="ro-cols">
+        <div class="ro-box">
+          <div class="ro-label">Customer</div>
+          ${kv('Name', job.customer_name, 'wide')}
+          ${kv('Phone', job.customer_phone)}
+          ${kv('Email', job.customer_email)}
+        </div>
+        <div class="ro-box">
+          <div class="ro-label">Vehicle</div>
+          <div class="kv-row">${kv('Rego', v.rego, 'big')}${kv('Year', v.year)}</div>
+          ${kv('Make / model', [v.make, v.model].filter(Boolean).join(' '), 'wide')}
+          ${kv('VIN', v.vin, 'mono wide')}
+          <div class="kv-row">${kv('Engine', v.engine)}${kv('Colour', v.colour)}</div>
+        </div>
+      </section>
+
+      <table class="ro-strip">
+        <tr><th>Date in</th><th>Odometer in</th><th>Odometer out</th><th>Technician</th><th>Status</th><th>Printed</th></tr>
+        <tr><td>${esc(day(job.invoice_date || job.created_at))}</td><td>${esc(km(job.odometer_in))}</td><td>${esc(km(job.odometer_out))}</td>
+          <td>${esc(nameOf(job.assigned_to))}</td><td>${STATUS[job.status]}</td><td>${esc(day(new Date()))}</td></tr>
       </table>
-      <h3>Work to be done</h3>
-      <table>${(tasks ?? []).map((t) => `<tr><td style="width:70%"><span class="box">${t.done ? '✓' : ''}</span>${esc(t.description)}${t.quantity != null && Number(t.quantity) !== 1 ? ` ×${esc(Number(t.quantity))}` : ''}${t.note ? `<div style="margin:4px 0 0 26px;color:#444">${esc(t.note)}</div>` : ''}</td><td>${t.done ? `${esc(nameOf(t.done_by))} ${fmtTime(t.done_at)}` : ''}</td></tr>`).join('')}</table>
-      ${(jd ?? []).length ? `<p><b>Reference docs:</b> ${(jd ?? []).map((d) => esc(d.doc?.title)).join(', ')}</p>` : ''}
-      <h3>Tech notes</h3>
-      <div class="lines">${esc(job.tech_notes ?? '')}</div>
-      ${photoCount ? `<p class="small">${photoCount} photo(s) on file in the job card app.</p>` : ''}
-      <div class="sig"><div>Technician</div><div>Date</div></div>
-    </div>`;
+
+      <table class="ro-ops">
+        <thead><tr><th class="c-no">Op</th><th>Work to be performed</th><th class="c-qty">Qty</th><th class="c-chk">Done</th><th class="c-tech">Tech / completed</th></tr></thead>
+        <tbody>
+          ${ops.map((t, i) => `<tr class="${t.done ? 'is-done' : ''}">
+            <td class="c-no">${String(i + 1).padStart(2, '0')}</td>
+            <td><div class="op-desc">${esc(t.description)}</div>${t.source === 'rule' ? '<div class="op-tag">Required check</div>' : ''}${t.note ? `<div class="op-note">${esc(t.note)}</div>` : ''}</td>
+            <td class="c-qty">${t.quantity != null ? esc(Number(t.quantity)) : ''}</td>
+            <td class="c-chk"><span class="box">${t.done ? '✓' : ''}</span></td>
+            <td class="c-tech"><span class="tick-info">${t.done ? `${esc(nameOf(t.done_by))}<br>${esc(fmtTime(t.done_at))}` : ''}</span></td>
+          </tr>`).join('')}
+          ${Array.from({ length: Math.max(0, 3 - ops.length) }, () => '<tr class="blank"><td class="c-no"></td><td></td><td></td><td class="c-chk"><span class="box"></span></td><td></td></tr>').join('')}
+        </tbody>
+      </table>
+      <div class="ro-summary"><span class="tick-info">${done} of ${ops.length} operations completed</span></div>
+
+      <section class="ro-box ro-notes-box">
+        <div class="ro-label">Technician findings / notes</div>
+        <div class="ro-notes ${job.tech_notes ? '' : 'empty'}">${esc(job.tech_notes ?? '')}</div>
+      </section>
+
+      ${docs.length || photos.length ? `<section class="ro-refs">
+        ${docs.length ? `<div><b>Reference documents:</b> ${docs.map(esc).join(' · ')}</div>` : ''}
+        ${photos.length ? `<div><b>Photos on file:</b> ${photos.length}</div>` : ''}
+      </section>` : ''}
+
+      <section class="ro-sigs">
+        <div class="sig sig-cust">
+          <div class="ro-label">Customer authorisation</div>
+          <p>${esc(s.print_terms || DEFAULT_TERMS)}</p>
+          <div class="sig-line"><span>Signature</span><span>Date</span></div>
+        </div>
+        <div class="sig"><div class="ro-label">Technician</div><div class="sig-space"></div><div class="sig-line"><span>Signature</span><span>Date</span></div></div>
+        <div class="sig"><div class="ro-label">Quality check / road test</div><div class="sig-space"></div><div class="sig-line"><span>Signature</span><span>Date</span></div></div>
+      </section>
+      <footer class="ro-foot">${esc(s.business_name || '')} · Repair order ${esc(job.job_number)} · This document does not show pricing. Refer to your tax invoice.</footer>
+
+      <section class="ro-photos" id="roPhotos" hidden>
+        <div class="ro-head ro-head-sm"><div class="ro-bizname">${esc(s.business_name || '')}</div><div class="ro-num">${esc(job.job_number)} · Photos</div></div>
+        <div class="ro-photo-grid">${photos.map((p) => `<figure><img src="${esc(photoUrl(p) ?? '')}" alt=""><figcaption>${esc(p.caption || '')} ${esc(fmtTime(p.created_at))}</figcaption></figure>`).join('')}</div>
+      </section>
+    </article></div>`;
+
+  q('#optTicks').onchange = (e) => q('#ro').classList.toggle('no-ticks', !e.target.checked);
+  q('#optPhotos').onchange = (e) => { q('#roPhotos').hidden = !e.target.checked; };
 }
 
 // ------------------------------------------------------------ settings
@@ -705,6 +928,17 @@ async function viewSettings(params) {
     <section class="card"><h2>General</h2>
       <div class="grid2">
         <label class="span2">Business name (shown on job cards)<input id="bizName" value="${esc(settings.business_name)}"></label>
+        <label class="span2">Address<input data-set="business_address" value="${esc(settings.business_address ?? '')}" placeholder="Street, suburb QLD postcode"></label>
+        <label>Phone<input data-set="business_phone" value="${esc(settings.business_phone ?? '')}" inputmode="tel"></label>
+        <label>ABN<input data-set="business_abn" value="${esc(settings.business_abn ?? '')}" inputmode="numeric"></label>
+        <label class="span2">Email<input data-set="business_email" value="${esc(settings.business_email ?? '')}" type="email"></label>
+        <div class="span2">
+          <label>Logo for the printed repair order</label>
+          <div class="row" style="margin-top:4px"><div id="logoPrev" class="logo-prev muted small">No logo yet</div>
+            <label class="ghost-btn shrink">Upload logo<input type="file" id="logoIn" accept="image/*" hidden></label></div>
+        </div>
+        <label class="span2">Customer authorisation text (printed above the customer signature)
+          <textarea data-set="print_terms" placeholder="${esc(DEFAULT_TERMS)}">${esc(settings.print_terms ?? '')}</textarea></label>
         <label class="span2" style="display:flex;gap:10px;align-items:center;color:var(--text)">
           <input type="checkbox" id="regoRef" style="width:24px;min-height:0" ${settings.rego_to_xero_reference ? 'checked' : ''}>
           Write the rego into the Xero invoice Reference (e.g. "REGO: 123ABC")</label>
@@ -751,6 +985,26 @@ async function viewSettings(params) {
   };
   q('#bizName').onchange = (e) => saveSettings({ business_name: e.target.value.trim() || 'Job Cards' });
   q('#regoRef').onchange = (e) => saveSettings({ rego_to_xero_reference: e.target.checked });
+  main.querySelectorAll('[data-set]').forEach((el) => {
+    el.onchange = () => saveSettings({ [el.dataset.set]: el.value.trim() || null });
+  });
+  async function showLogo() {
+    if (!settings.logo_path) return;
+    const { data } = await sb.storage.from('tech-docs').createSignedUrl(settings.logo_path, 3600);
+    if (data?.signedUrl) q('#logoPrev').innerHTML = `<img src="${esc(data.signedUrl)}" alt="logo">`;
+  }
+  showLogo();
+  q('#logoIn').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const ext = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const path = `branding/logo-${Date.now()}.${ext}`;
+    const up = await sb.storage.from('tech-docs').upload(path, file, { contentType: file.type || 'image/png' });
+    if (up.error) return fail(up.error);
+    const old = settings.logo_path;
+    await saveSettings({ logo_path: path });
+    if (old) sb.storage.from('tech-docs').remove([old]);
+    showLogo();
+  };
 
   // ---- library
   let library = [];
