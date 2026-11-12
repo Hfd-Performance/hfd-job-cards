@@ -1080,7 +1080,8 @@ async function viewSettings(params) {
         <h3 class="span2" style="margin:6px 0 0">Add a staff member</h3>
         <label>Name<input name="display_name" required placeholder="e.g. Jake"></label>
         <label>Email (their login)<input name="email" type="email" required autocomplete="off"></label>
-        <label class="span2">Password<div class="row"><input name="password" required minlength="8" autocomplete="new-password" class="mono"><button type="button" class="ghost" id="genPw">Generate</button></div></label>
+        <p class="span2" id="pwNote" style="margin:0"></p>
+        <label class="span2" id="pwRow">Password for this person<div class="row"><input name="password" minlength="8" autocomplete="new-password" class="mono"><button type="button" class="ghost" id="genPw">Generate</button></div></label>
         <label class="span2 check-row" style="margin-top:0"><input type="checkbox" name="is_admin"> Admin (can change settings, rules, delete jobs and any photo)</label>
         <p class="span2 small muted" style="margin:0">They'll get an email with the web address and this password, and must choose their own password the first time they sign in.</p>
         <button class="span2">Create login</button>
@@ -1285,29 +1286,39 @@ async function viewSettings(params) {
   }
   const sf = q('#staffForm');
   let genericPw = (await sb.from('admin_settings').select('default_staff_password').eq('id', 1).maybeSingle()).data?.default_staff_password || '';
+  let useGeneric = true;     // false once the admin chooses a one-off password for this person
+  const syncPw = () => {
+    const generic = useGeneric && genericPw.length >= 8;
+    q('#pwRow').hidden = generic;
+    q('#pwNote').innerHTML = generic
+      ? `Starting password: <b class="mono">${esc(genericPw)}</b> · <a href="#" id="pwCustom">use a different one for this person</a>`
+      : (genericPw.length >= 8 ? '<a href="#" id="pwGeneric">use the generic password instead</a>' : '');
+    if (q('#pwCustom')) q('#pwCustom').onclick = (e) => { e.preventDefault(); useGeneric = false; sf.password.value = ''; syncPw(); sf.password.focus(); };
+    if (q('#pwGeneric')) q('#pwGeneric').onclick = (e) => { e.preventDefault(); useGeneric = true; syncPw(); };
+  };
   q('#genericPw').value = genericPw;
-  sf.password.value = genericPw;
+  syncPw();
+  q('#genericPw').oninput = (e) => { genericPw = e.target.value.trim(); syncPw(); };   // takes effect instantly
   q('#genericPw').onchange = async (e) => {
     const v = e.target.value.trim();
-    if (v && v.length < 8) return toast('Make it at least 8 characters', 'error');
+    if (v && v.length < 8) return toast('Make the generic password at least 8 characters', 'error');
     const { error } = await sb.from('admin_settings').update({ default_staff_password: v || null, updated_at: new Date().toISOString() }).eq('id', 1);
     if (error) return fail(error);
-    genericPw = v; if (!sf.password.value || sf.password.dataset.generic) { sf.password.value = v; sf.password.dataset.generic = '1'; }
     flashSaved(e.target);
   };
-  sf.password.dataset.generic = '1';
-  sf.password.oninput = () => { delete sf.password.dataset.generic; };
-  q('#genPw').onclick = () => { sf.password.value = genPassword(); delete sf.password.dataset.generic; };
+  q('#genPw').onclick = () => { sf.password.value = genPassword(); };
   sf.onsubmit = async (e) => {
     e.preventDefault();
-    const body = { display_name: sf.display_name.value.trim(), email: sf.email.value.trim(), password: sf.password.value, is_admin: sf.is_admin.checked };
+    const password = useGeneric && genericPw.length >= 8 ? genericPw : sf.password.value;
+    if (password.length < 8) { toast(genericPw ? 'Enter a password for this person (8+ characters)' : 'Set a generic starting password above, or enter one for this person (8+ characters)', 'error'); (q('#pwRow').hidden ? q('#genericPw') : sf.password).focus(); return; }
+    const body = { display_name: sf.display_name.value.trim(), email: sf.email.value.trim(), password, is_admin: sf.is_admin.checked };
     const btn = sf.querySelector('button:not([type])'); btn.disabled = true;
     try {
       const r = await fn('staff', '/create', { method: 'POST', body });
       const info = { to: body.email, name: body.display_name, password: body.password, kind: 'new' };
       const el = q('#newLogin'); el.innerHTML = loginResultCard(r, info); wireLoginResult(el, info);
       sf.display_name.value = ''; sf.email.value = ''; sf.is_admin.checked = false;
-      sf.password.value = genericPw; sf.password.dataset.generic = '1';
+      sf.password.value = ''; useGeneric = true; syncPw();
       await renderStaff();
     } catch (err) { fail(err); } finally { btn.disabled = false; }
   };
